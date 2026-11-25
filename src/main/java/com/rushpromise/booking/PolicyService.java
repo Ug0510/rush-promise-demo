@@ -1,6 +1,7 @@
 package com.rushpromise.booking;
 
 import com.rushpromise.booking.BookingModels.Policy;
+import com.rushpromise.platform.TenantContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
@@ -41,6 +42,8 @@ public class PolicyService {
     private final JdbcTemplate db;
     private final URI url;
     private final long refreshMs;
+    @Value("${RUSH_SLOT_POLICY_ENABLED:false}")
+    private boolean slotPolicyEnabled;
     private volatile Snapshot last;
     private boolean lastRefreshFailed;
     private boolean sawUnversionedNormal;
@@ -61,12 +64,12 @@ public class PolicyService {
 
     @PostConstruct
     void restoreOnStartup() {
-        if (!key.isBlank()) restoreCache();
+        if (!slotPolicyEnabled && !key.isBlank()) restoreCache();
     }
 
     @Scheduled(fixedDelayString = "${rush.policy.refresh-ms}")
     public synchronized void refresh() {
-        if (key.isBlank()) return;
+        if (slotPolicyEnabled || key.isBlank()) return;
         restoreCache();
         try {
             HttpRequest request = HttpRequest.newBuilder(url).timeout(Duration.ofSeconds(3))
@@ -191,6 +194,7 @@ public class PolicyService {
 
     public Policy current() {
         Instant now = Instant.now();
+        if (!TenantContext.legacy()) return profile(false, "SHOP_DEFAULT", null, now);
         Snapshot observed = last;
         if (observed == null) return profile(true, "FALLBACK", null, now);
         String source = observed.fetchedAt().plusMillis(refreshMs * 2).isBefore(now) ? "CACHED" : "LIVE";

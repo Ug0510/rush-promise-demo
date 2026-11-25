@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f2f3f0">
+  <title>Owner workspace · Rush Promise</title>
+  <link rel="stylesheet" href="/voice-ui/caller.css">
+  <link rel="stylesheet" href="/owner-ui/owner.css">
+  <script defer src="/owner-ui/owner.js"></script>
+</head>
+<body>
+  <div class="owner-shell">
+    <header class="owner-top">
+      <div class="owner-brand"><span class="brand">Rush Promise</span><span id="brand-shop" hidden></span></div>
+      <nav id="owner-nav" aria-label="Owner workspace" hidden>
+        <a href="/staff">Pickup desk</a>
+        <a href="#menu" data-view="menu" aria-current="page">Menu &amp; stock</a>
+        <a href="#settings" data-view="settings">Shop settings</a>
+      </nav>
+      <div id="owner-tools" hidden><span id="owner-online" class="owner-online" role="status">Live</span><button type="button" id="owner-logout" class="button quiet">Sign out</button></div>
+    </header>
+
+    <main>
+      <p id="loading" role="status" class="loading">Opening the owner workspace…</p>
+      <section id="owner-auth" class="auth-grid" hidden aria-labelledby="auth-title">
+        <form id="auth-form" class="surface auth-form">
+          <h1 id="auth-title">Sign in to your shop</h1>
+          <p id="auth-instructions">Use your owner account to manage your shop.</p>
+          <label>Username <input id="owner-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="48"></label>
+          <label>Password
+            <span class="password-wrap">
+              <input id="owner-password" name="password" type="password" autocomplete="current-password" required maxlength="128">
+              <button id="show-password" type="button" aria-label="Show password" aria-pressed="false">Show</button>
+            </span>
+          </label>
+          <p id="password-note" class="film" hidden>Use at least 12 characters.</p>
+          <p id="auth-error" class="form-error" role="alert" hidden></p>
+          <button type="submit" id="auth-submit" class="button primary">Sign in</button>
+          <p id="auth-alternative" class="auth-switch" hidden><span id="auth-switch-hint"></span> <button id="auth-switch" type="button"></button></p>
+        </form>
+        <aside id="setup-guide" class="surface setup-guide" hidden>
+          <h2>Set up your shop</h2>
+          <ol><li>Add shop details</li><li>Set prices and stock</li><li>Take pickup orders</li></ol>
+        </aside>
+      </section>
+
+      <section id="shop-panel" class="surface settings-form" hidden aria-labelledby="shop-title">
+        <form id="shop-form">
+          <h1 id="shop-title">Set up your shop</h1>
+          <p>Use details your customers can see.</p>
+          <label>Shop name <input name="displayName" id="public-name" autocomplete="organization" maxlength="70" required></label>
+          <label>Shop link name <input name="slug" id="shop-slug" autocomplete="off" autocapitalize="none" spellcheck="false" pattern="[a-z0-9]+(-[a-z0-9]+)*" maxlength="48" required></label>
+          <p id="slug-help" class="film">Use lowercase letters, numbers, and hyphens.</p>
+          <label>Public area <input name="area" maxlength="120" placeholder="Optional"></label>
+          <label>Public opening hours <input name="hours" maxlength="120" placeholder="Optional"></label>
+          <label>Customer pickup instructions <textarea name="pickupInstructions" maxlength="500" rows="3" placeholder="Optional"></textarea></label>
+          <p id="shop-error" class="form-error" role="alert" hidden></p>
+          <p id="shop-saved" class="success" role="status" hidden></p>
+          <a id="customer-checkout" class="button quiet" hidden>Open customer checkout</a>
+          <button type="submit" id="shop-submit" class="button primary">Save shop</button>
+        </form>
+      </section>
+
+      <section id="menu-panel" hidden aria-labelledby="menu-title">
+        <div class="menu-heading">
+          <h1 id="menu-title">Menu &amp; stock</h1>
+          <button type="button" id="add-item" class="button primary"><span aria-hidden="true">+</span> Add item</button>
+        </div>
+        <p id="menu-error" class="form-error" role="alert" hidden></p>
+        <div class="menu-grid">
+          <div class="surface product-list">
+            <p>Set aside the stock callers can reserve.</p>
+            <table>
+              <thead><tr><th scope="col">Item</th><th scope="col">Price</th><th scope="col">Phone stock</th></tr></thead>
+              <tbody id="product-rows"></tbody>
+            </table>
+            <p id="menu-empty" class="empty" hidden>No items yet. Add an item to take pickup orders.</p>
+          </div>
+          <form id="product-editor" class="surface product-editor">
+            <h2 id="product-title">Add item</h2>
+            <label>Item name <input name="itemName" maxlength="80" required></label>
+            <label>Sell by <select name="unit" id="unit" required><option value="GRAMS">Weight</option><option value="PIECE">Piece</option></select></label>
+            <label><span id="product-price-label">Price per kg</span><span class="rupees"><span aria-hidden="true">₹</span><input name="price" type="text" inputmode="decimal" maxlength="11" required></span></label>
+            <label><span id="product-stock-label">Grams set aside for phone pickup</span><input name="stock" type="number" min="0" step="1" max="100000" inputmode="numeric" required></label>
+            <p id="product-error" class="form-error" role="alert" hidden></p>
+            <p id="product-saved" class="success" role="status" hidden></p>
+            <button type="submit" class="button primary" id="product-save">Save item</button>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

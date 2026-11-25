@@ -26,13 +26,10 @@ public class BookingController {
     private final BookingService booking;
     private final ShopService shop;
     private final StaffEvents staffEvents;
-    private final PolicyService policies;
-
-    BookingController(BookingService booking, ShopService shop, StaffEvents staffEvents, PolicyService policies) {
+    BookingController(BookingService booking, ShopService shop, StaffEvents staffEvents) {
         this.booking = booking;
         this.shop = shop;
         this.staffEvents = staffEvents;
-        this.policies = policies;
     }
 
     @PostMapping("/api/quotes")
@@ -64,7 +61,7 @@ public class BookingController {
 
     @GetMapping("/api/staff/snapshot")
     Map<String, Object> snapshot() {
-        return shop.snapshot(policies.current());
+        return shop.snapshot(booking.shopPolicy());
     }
 
     @GetMapping(path = "/api/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -117,7 +114,23 @@ public class BookingController {
 
     @GetMapping("/api/policy")
     Policy policy() {
-        return policies.current();
+        return booking.shopPolicy();
+    }
+
+    @GetMapping("/api/policy/pickup-options")
+    PickupPolicyComparison pickupOptions(@RequestAttribute(BookingAccessFilter.STAFF_ROLE_ATTRIBUTE) String role,
+                                         @RequestParam String sku, @RequestParam int grams,
+                                         @RequestParam(defaultValue = "19:30,20:00") List<String> times) {
+        requireOwner(role);
+        var options = booking.pickupPolicies(sku, grams, times);
+        if (options == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Pickup comparison is unavailable");
+        return options;
+    }
+
+    @GetMapping("/api/policy/saved-comparisons")
+    List<PickupPolicyComparison> savedComparisons(@RequestAttribute(BookingAccessFilter.STAFF_ROLE_ATTRIBUTE) String role) {
+        requireOwner(role);
+        return booking.savedPolicyComparisons();
     }
 
     @PostMapping("/api/orders/{id}/{action}")
@@ -137,6 +150,11 @@ public class BookingController {
         return response(shop.reset(request));
     }
 
+    @PostMapping("/ops/demo/policy-fixture")
+    ResponseEntity<Outcome> policyFixture() {
+        return response(shop.setupPolicyFixture());
+    }
+
     @PostMapping("/api/demo/clock")
     ResponseEntity<Outcome> clock(@RequestBody ClockRequest request) {
         return response(shop.changeClock(request.now()));
@@ -144,5 +162,9 @@ public class BookingController {
 
     private static ResponseEntity<Outcome> response(Outcome result) {
         return ResponseEntity.status(result.status()).body(result);
+    }
+
+    private static void requireOwner(String role) {
+        if (!"OWNER".equals(role)) throw new ResponseStatusException(HttpStatus.FORBIDDEN);
     }
 }

@@ -22,4 +22,14 @@ class VoiceSessionServiceTest {
         assertThat(SpeechIntent.parse("नहीं!").decision()).isEqualTo(SpeechIntent.Decision.NO);
     }
 
+    @Test
+    void readsPickupClockAndQuantityInNaturalHindi() {
+        assertThat(VoiceConversation.hindiTime("19:30")).isEqualTo("शाम साढ़े सात बजे");
+        assertThat(VoiceConversation.hindiTime("20:00")).isEqualTo("रात आठ बजे");
+        assertThat(VoiceConversation.amount(2500, "GRAMS", true)).isEqualTo("ढाई किलो");
+        assertThat(VoiceConversation.amount(2, "PIECE", true)).isEqualTo("2 पीस");
+        assertThat(VoiceConversation.spokenItem("Chocolate brownie", true)).isEqualTo("चॉकलेट ब्राउनी");
+        assertThat(VoiceConversation.spokenItem("Pistachio brownie", true)).isEqualTo("Pistachio brownie");
+    }
+
 }

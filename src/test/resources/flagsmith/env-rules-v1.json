@@ -1,0 +1,102 @@
+{
+  "updated_at": "2026-11-25T08:31:46.918884Z",
+  "api_key": "local-evaluation-only",
+  "name": "Development",
+  "identity_overrides": [],
+  "feature_states": [
+    {
+      "django_id": 1,
+      "enabled": false,
+      "feature": {
+        "id": 1,
+        "name": "rush_mode",
+        "type": "STANDARD"
+      },
+      "multivariate_feature_state_values": [],
+      "feature_segment": null,
+      "feature_state_value": null
+    },
+    {
+      "django_id": 2,
+      "enabled": true,
+      "feature": {
+        "id": 2,
+        "name": "promise_profile",
+        "type": "STANDARD"
+      },
+      "multivariate_feature_state_values": [],
+      "feature_segment": null,
+      "feature_state_value": "{\"schema\":1,\"profile\":\"NORMAL\",\"reason_code\":\"STANDARD\",\"approval_above_g\":4000,\"lead_time_min\":15,\"quote_ttl_s\":180,\"grace_min\":30,\"hold_min\":15}"
+    }
+  ],
+  "project": {
+    "segments": [
+      {
+        "id": 1,
+        "name": "busy-slot",
+        "rules": [
+          {
+            "type": "ALL",
+            "rules": [],
+            "conditions": [
+              {
+                "property_": "slot_load_pct",
+                "operator": "GREATER_THAN_INCLUSIVE",
+                "value": "80"
+              }
+            ]
+          }
+        ],
+        "feature_states": [
+          {
+            "django_id": 3,
+            "enabled": true,
+            "feature": {
+              "id": 2,
+              "name": "promise_profile",
+              "type": "STANDARD"
+            },
+            "multivariate_feature_state_values": [],
+            "feature_segment": {
+              "priority": 0
+            },
+            "feature_state_value": "{\"schema\":1,\"profile\":\"BUSY_SLOT\",\"reason_code\":\"SLOT_NEAR_CAPACITY\",\"approval_above_g\":2000,\"lead_time_min\":30,\"quote_ttl_s\":120,\"grace_min\":20,\"hold_min\":10}"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "name": "rush-hour",
+        "rules": [
+          {
+            "type": "ALL",
+            "rules": [],
+            "conditions": [
+              {
+                "property_": "rush",
+                "operator": "EQUAL",
+                "value": "true"
+              }
+            ]
+          }
+        ],
+        "feature_states": [
+          {
+            "django_id": 4,
+            "enabled": true,
+            "feature": {
+              "id": 2,
+              "name": "promise_profile",
+              "type": "STANDARD"
+            },
+            "multivariate_feature_state_values": [],
+            "feature_segment": {
+              "priority": 1
+            },
+            "feature_state_value": "{\"schema\":1,\"profile\":\"RUSH\",\"reason_code\":\"RUSH_HOUR\",\"approval_above_g\":3000,\"lead_time_min\":30,\"quote_ttl_s\":120,\"grace_min\":20,\"hold_min\":15}"
+          }
+        ]
+      }
+    ]
+  }
+}

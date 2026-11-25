@@ -1,5 +1,6 @@
 package com.rushpromise.booking;
 
+import com.rushpromise.platform.PlatformContextFilter;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -23,7 +24,7 @@ import java.util.regex.Pattern;
 public class BookingAccessFilter extends OncePerRequestFilter {
     static final String STAFF_ROLE_ATTRIBUTE = "com.rushpromise.booking.BookingAccessFilter.role";
     private static final Pattern FULFILLMENT = Pattern.compile("/api/orders/[0-9]+/(pack|short|return)|/api/batches/[^/]+/ready");
-    private static final Pattern OWNER_ACTION = Pattern.compile("/api/orders/[0-9]+/(approve|reject|cancel)|/api/batches/[^/]+/unblock|/api/messages/.+|/api/shop/profile");
+    private static final Pattern OWNER_ACTION = Pattern.compile("/api/orders/[0-9]+/(approve|reject|cancel)|/api/batches/[^/]+/unblock|/api/messages/[0-9a-fA-F-]+/(retry|resend)|/api/shop/profile");
     private final String staffToken;
     private final String ownerToken;
     private final String operatorToken;
@@ -61,15 +62,32 @@ public class BookingAccessFilter extends OncePerRequestFilter {
             return;
         }
         String method = request.getMethod();
+        if (under(path, "/api/auth") || ((method.equals("GET") || method.equals("HEAD")) && under(path, "/api/storefront"))) {
+            chain.doFilter(request, response);
+            return;
+        }
+        if (under(path, "/api/owner")) {
+            if (!PlatformContextFilter.ownerAuthenticated(request)) {
+                response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
+            } else {
+                chain.doFilter(request, response);
+            }
+            return;
+        }
         if (method.equals("POST") && (path.equals("/api/voice/browser/turn") || path.equals("/api/voice/sarvam/turn"))) {
             chain.doFilter(request, response);
             return;
         }
-        if (under(path, "/api/quotes") && matches(bookingToken, request.getHeader("X-Booking-Token"))) {
+        boolean authenticatedOwner = PlatformContextFilter.ownerAuthenticated(request);
+        if (!authenticatedOwner && under(path, "/api/quotes") && matches(bookingToken, request.getHeader("X-Booking-Token"))) {
             chain.doFilter(request, response);
             return;
         }
-        Role role = role(request.getHeader("X-Staff-Token"));
+        if (authenticatedOwner && !PlatformContextFilter.ownerHasShop(request)) {
+            response.sendError(HttpServletResponse.SC_FORBIDDEN);
+            return;
+        }
+        Role role = authenticatedOwner ? Role.OWNER : role(request.getHeader("X-Staff-Token"));
         if (role == null) {
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
             return;

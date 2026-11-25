@@ -17,6 +17,7 @@
         <a href="#pickup" aria-current="location">Pickup desk</a>
         <a href="#stock">Stock</a>
         <a href="#activity">Activity</a>
+        <a id="owner-menu-entry" href="/owner#menu" hidden>Menu &amp; stock</a>
       </nav>
       <div id="desk-tools" class="desk-tools" hidden>
         <span id="live-state" class="live-state" role="status" data-status="connecting">Connecting</span>
@@ -37,11 +38,12 @@
 
     <main id="workspace" hidden>
       <section id="pickup" class="desk-title">
-        <h1 id="desk-heading" tabindex="-1">Pickup desk</h1>
+        <div><p id="desk-shop" class="muted" hidden></p><h1 id="desk-heading" tabindex="-1">Pickup desk</h1></div>
         <p class="shop-clock">Shop time <strong id="shop-clock">—</strong></p>
       </section>
       <p id="connection" class="connection" role="status" hidden></p>
       <p id="desk-error" class="desk-error" role="alert" hidden></p>
+      <p id="desk-success" class="desk-success" role="status" hidden></p>
       <div class="desk-columns">
         <div class="desk-column">
           <section class="pack-panel surface" aria-labelledby="pack-title">
@@ -54,10 +56,16 @@
               <h2 id="decisions-title">Needs owner approval</h2><span id="pending-count" class="pending-count" hidden></span>
             </div>
             <div id="approvals"></div>
+            <div id="policy-comparisons" class="policy-comparisons" hidden></div>
+            <div id="stock-exceptions" class="stock-exceptions" hidden>
+              <h3 id="exceptions-title">Stock exceptions</h3>
+              <div id="stock-issues"></div>
+            </div>
             <div class="policy-line">
               <p id="policy-status" class="policy-status"></p>
-              <a id="flagsmith" class="desk-link" href="https://app.flagsmith.com/" target="_blank" rel="noopener noreferrer" hidden>Edit in Flagsmith ↗</a>
+              <a id="flagsmith" class="desk-link" href="https://app.flagsmith.com/" target="_blank" rel="noopener noreferrer" hidden>Open Flagsmith Development ↗</a>
             </div>
+            <p id="pickup-load" class="policy-compare-note muted" hidden></p>
           </section>
         </div>
         <div class="desk-column">
@@ -105,8 +113,13 @@
       <form id="action-form">
         <h2 id="dialog-title"></h2>
         <p id="dialog-detail"></p>
-        <label id="dialog-weight" hidden>Grams <input id="action-grams" type="number" min="0" step="1" inputmode="numeric"></label>
+        <label id="dialog-weight" hidden><span id="dialog-unit">Grams</span> <input id="action-grams" type="number" min="0" step="1" inputmode="numeric"></label>
         <p id="dialog-error" class="desk-error" role="alert" hidden></p>
+          <div id="dialog-options" class="policy-comparisons" hidden>
+            <button id="compare-options" type="button" class="button quiet">Compare pickup options</button>
+            <p id="compare-status" class="muted" role="status" hidden></p>
+            <div id="compare-results"></div>
+          </div>
         <div class="dialog-actions">
           <button id="dialog-close" type="button" class="button quiet">Close</button>
           <button id="dialog-decline" type="button" class="button quiet" hidden>Decline</button>

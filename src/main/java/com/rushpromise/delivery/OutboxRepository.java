@@ -20,10 +20,13 @@ class OutboxRepository {
 
     record Claim(UUID messageId, UUID token) {}
     record Dispatch(UUID messageId, UUID runId, UUID attemptId, String kind, String recipient, String body) {}
+    record Replay(int status, String code) {}
 
     private record Message(UUID id, UUID runId, UUID attemptId, String kind, String recipient, String body,
                            int attemptCount, int retryCount, Instant retryStartedAt) {}
     private record Attempt(String status, String providerSid) {}
+    private record Evidence(UUID id, String status, String providerSid) {}
+    private record ReplayState(String kind, String status, String lastError) {}
 
     Claim claim(boolean live, String liveRecipient) {
         UUID token = UUID.randomUUID();
@@ -161,12 +164,9 @@ class OutboxRepository {
             .param("error", result.error()).update();
 
         if (result.status().equals("DELIVERED")) {
-            database.sql("""
-                UPDATE outbox_messages SET status='DELIVERED', provider_sid=:sid, last_error=NULL,
-                  sent_at=COALESCE(sent_at, now()), delivered_at=COALESCE(delivered_at, now()),
-                  lease_token=NULL, lease_expires_at=NULL, updated_at=now()
-                WHERE id=:id AND status<>'DELIVERED'
-                """).param("id", message.id()).param("sid", result.providerSid()).update();
+            markDelivered(message.id(), result.providerSid());
+        } else if (result.status().equals("SUBMITTED") && !attemptId.equals(message.attemptId())) {
+            acknowledgePriorSubmission(message.id(), new Evidence(attemptId, result.status(), result.providerSid()));
         } else if (attemptId.equals(message.attemptId())) {
             if (result.status().equals("FAILED_RETRYABLE")) {
                 recordRetry(message);
@@ -180,6 +180,71 @@ class OutboxRepository {
                 """).param("id", message.id()).param("status", result.status()).param("sid", result.providerSid())
                 .param("error", result.error()).update();
         }
+    }
+
+    @Transactional
+    public Replay requestReplay(UUID id, boolean resend, boolean reviewed) {
+        String orderStatus = database.sql("""
+            SELECT o.status FROM orders o JOIN outbox_messages m ON m.order_id=o.id AND m.run_id=o.run_id
+            JOIN shop_state s ON s.run_id=o.run_id WHERE m.id=:id
+              AND NOT EXISTS (SELECT 1 FROM notification_live_grant g WHERE g.run_id=o.run_id AND g.order_id=o.id)
+            FOR SHARE OF o
+            """).param("id", id).query(String.class).optional().orElse(null);
+        if (orderStatus == null) return new Replay(404, "NOTICE_UNAVAILABLE");
+        var message = database.sql("""
+            SELECT kind,status,last_error FROM outbox_messages WHERE id=:id FOR UPDATE
+            """).param("id", id).query((row, index) -> new ReplayState(row.getString("kind"),
+                row.getString("status"), row.getString("last_error"))).optional().orElse(null);
+        if (message == null) return new Replay(404, "NOTICE_UNAVAILABLE");
+        boolean exhausted = message.status().equals("FAILED") && "RETRY_EXHAUSTED".equals(message.lastError());
+        boolean eligible = resend ? message.status().equals("NEEDS_REVIEW") : message.status().equals("FAILED_RETRYABLE") || exhausted;
+        if (!eligible) return new Replay(409, "NOTICE_NOT_REPLAYABLE");
+        if (resend && !reviewed) return new Replay(409, "REVIEW_REQUIRED");
+        if (!stillNeeded(message.kind(), orderStatus)) {
+            database.sql("""
+                UPDATE outbox_messages SET status='SUPPRESSED',last_error='ORDER_STATE_CHANGED',updated_at=now(),
+                    lease_token=NULL,lease_expires_at=NULL WHERE id=:id
+                """).param("id", id).update();
+            return new Replay(409, "ORDER_STATE_CHANGED");
+        }
+
+        // Signed callbacks serialize on this same outbox row. A confirmed submission wins over a new attempt.
+        var evidence = database.sql("""
+            SELECT id,status,provider_sid FROM notification_attempts
+            WHERE message_id=:id AND status IN ('DELIVERED','SUBMITTED') AND provider_sid IS NOT NULL
+            ORDER BY (status='DELIVERED') DESC,attempt_number DESC LIMIT 1
+            """).param("id", id).query((row, index) -> new Evidence(row.getObject("id", UUID.class),
+                row.getString("status"), row.getString("provider_sid"))).optional().orElse(null);
+        if (evidence != null) {
+            if (evidence.status().equals("DELIVERED")) markDelivered(id, evidence.providerSid());
+            else acknowledgePriorSubmission(id, evidence);
+            return new Replay(409, "PROVIDER_EVIDENCE_FOUND");
+        }
+        database.sql("""
+            UPDATE outbox_messages SET status='QUEUED',next_attempt_at=now(),updated_at=now(),
+                retry_count=CASE WHEN :new_cycle THEN 0 ELSE retry_count END,
+                retry_started_at=CASE WHEN :new_cycle THEN NULL ELSE retry_started_at END,
+                lease_token=NULL,lease_expires_at=NULL,last_error=NULL
+            WHERE id=:id
+            """).param("id", id).param("new_cycle", resend || exhausted).update();
+        return new Replay(202, "NOTICE_QUEUED");
+    }
+
+    private void acknowledgePriorSubmission(UUID id, Evidence evidence) {
+        database.sql("""
+            UPDATE outbox_messages SET status='SUBMITTED',attempt_id=:attempt,provider_sid=:sid,last_error=NULL,
+                sent_at=COALESCE(sent_at,now()), lease_token=NULL,lease_expires_at=NULL,updated_at=now()
+            WHERE id=:id AND status IN ('QUEUED','CLAIMED','SENDING','UNKNOWN','NEEDS_REVIEW','FAILED_RETRYABLE','FAILED')
+            """).param("id", id).param("attempt", evidence.id()).param("sid", evidence.providerSid()).update();
+    }
+
+    private void markDelivered(UUID id, String sid) {
+        database.sql("""
+            UPDATE outbox_messages SET status='DELIVERED', provider_sid=:sid, last_error=NULL,
+                sent_at=COALESCE(sent_at,now()), delivered_at=COALESCE(delivered_at,now()),
+                lease_token=NULL, lease_expires_at=NULL, updated_at=now()
+            WHERE id=:id AND status<>'DELIVERED'
+            """).param("id", id).param("sid", sid).update();
     }
 
     private void recordRetry(Message message) {

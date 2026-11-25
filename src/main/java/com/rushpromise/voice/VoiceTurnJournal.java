@@ -287,6 +287,7 @@ class VoiceTurnJournal {
     static final class Session {
         String sku;
         Integer grams;
+        String unit;
         String pickupTime;
         Quote quote;
         SavedOrder order;

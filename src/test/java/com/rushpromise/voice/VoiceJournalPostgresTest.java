@@ -74,6 +74,43 @@ class VoiceJournalPostgresTest {
     }
 
     @Test
+    void correctedPromptKeepsTemplateFactsAndIgnoresYesForPreviousQuantity() {
+        var initial = speak(1, null, KAJU + " कुल 9000 रुपये।");
+        assertThat(initial.quote().grams()).isEqualTo(500);
+        assertThat(initial.quote().pickupTime()).isEqualTo("18:30");
+        assertThat(initial.quote().pricePaise()).isEqualTo(60000);
+        assertThat(initial.replyText()).contains("600").doesNotContain("9000");
+        var corrected = speak(2, initial.quote().id(), "nahi, 250 gram").quote();
+        assertThat(corrected.grams()).isEqualTo(250);
+        assertThat(corrected.id()).isNotEqualTo(initial.quote().id());
+        assertThat(speak(3, initial.quote().id(), "haan").quote()).isEqualTo(corrected);
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        assertThat(speak(4, corrected.id(), "haan ji").order().grams()).isEqualTo(250);
+        assertThat(count("SELECT COUNT(*) FROM orders")).isEqualTo(1);
+        assertThat(db.queryForObject("SELECT COUNT(*) FROM orders WHERE accepted_quote_id=? AND accepted_turn_id='turn-4'",
+                Integer.class, corrected.id())).isEqualTo(1);
+        assertThat(count("SELECT phone_grams_free FROM batches WHERE id='A'")).isEqualTo(250);
+        assertThat(count("SELECT used FROM pickup_slots WHERE (pickup_at AT TIME ZONE 'Asia/Kolkata')::time=TIME '18:30'")).isEqualTo(1);
+    }
+
+    @Test
+    void nativeEndDropsLateAssentWithoutChangingTheLedger() throws Exception {
+        var quote = nativeTurn(1, KAJU, null).at("/quote/id").asText();
+        String end = mvc.perform(post("/api/voice/sarvam/turn")
+                        .header("Authorization", "Bearer native-tool-fixture-only")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"event\":\"end\",\"interactionId\":\"sarvam-local-fixture\"}"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        assertThat(json.readTree(end).at("/state").asText()).isEqualTo("ENDED");
+        assertThat(nativeTurn(2, "haan", quote).at("/state").asText()).isEqualTo("ENDED");
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM booking_keys")).isZero();
+        assertThat(count("SELECT phone_grams_free FROM batches WHERE id='A'")).isEqualTo(500);
+        assertThat(count("SELECT SUM(used)::int FROM pickup_slots")).isZero();
+    }
+
+    @Test
     void menuAndPriceKeepCurrentQuoteAndExplicitLanguageSurvivesRestart() {
         var initial = speak(1, null, KAJU).quote();
         var english = speak(2, initial.id(), "English please");
@@ -108,8 +145,24 @@ class VoiceJournalPostgresTest {
         assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
         var accepted = speak(5, replaced.quote().id(), "हाँ");
         assertThat(accepted.order().status()).isEqualTo("AWAITING_APPROVAL");
+        assertThat(db.queryForObject("SELECT key FROM booking_keys WHERE status=201", String.class))
+                .isEqualTo("call:" + SESSION + ":quote:" + replaced.quote().id());
         var replay = restarted().turn(input(5, replaced.quote().id()), () -> { throw new AssertionError("Replayed turn contacted STT"); });
         assertThat(replay.order()).isEqualTo(accepted.order());
+    }
+
+    @Test
+    void voiceOfferRechecksTheAlternativeSlotWithoutChangingTheFirstOrder() {
+        var first = fillPickup("first-buyer", "18:30");
+        var offered = speak(1, null, KAJU).quote();
+        assertThat(offered.pickupTime()).isEqualTo("19:00");
+        assertThat(db.queryForObject("SELECT batch_id FROM quotes WHERE id=?", String.class, offered.id())).isEqualTo("B");
+        var competing = fillPickup("third-buyer", "19:00");
+        var changed = speak(2, offered.id(), "हाँ");
+        assertThat(changed.quote().pickupTime()).isEqualTo("19:30");
+        assertThat(changed.order()).isNull();
+        assertThat(shop.orders()).containsExactly(first, competing);
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isEqualTo(2);
     }
 
     @Test
@@ -156,6 +209,26 @@ class VoiceJournalPostgresTest {
         assertThat(restarted().poll(SESSION, "turn-2", PHONE).order().id()).isEqualTo(4821);
         assertThat(count("SELECT COUNT(*) FROM orders")).isEqualTo(1);
         assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isEqualTo(1);
+    }
+
+    @Test
+    void uncertainAcceptResolvesMissingKeyBeforeOfferingAnotherQuote() {
+        var quote = speak(1, null, KAJU).quote();
+        var unavailable = mock(BookingService.class, delegatesTo(booking));
+        doAnswer(invocation -> Outcome.error(503, "BOOKING_UNCERTAIN", null)).when(unavailable)
+                .accept(eq(quote.id().toString()), eq(new AcceptRequest(SESSION, "turn-2")), isNull());
+        var checking = new VoiceSessionService(unavailable, journal, conversation)
+                .turn(input(2, quote.id()), () -> spoken("हाँ"));
+        assertThat(checking.state()).isEqualTo("CHECKING_BOOKING");
+        assertThat(checking.order()).isNull();
+        assertThat(checking.replyText()).doesNotContain("फिर से");
+        expireLease(2);
+        restarted().recoverAcceptedTurns();
+        var resolved = restarted().poll(SESSION, "turn-2", PHONE);
+        assertThat(resolved.state()).isEqualTo("COLLECTING");
+        assertThat(resolved.replyText()).contains("बुक नहीं हुआ");
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isZero();
     }
 
     @Test
@@ -286,6 +359,10 @@ class VoiceJournalPostgresTest {
         var failed = service.turn(input(2, replay.quote().id()), () -> { throw new SarvamSpeech.SpeechUnavailable(); });
         assertThat(failed.quote()).isEqualTo(replay.quote());
         assertThat(count("SELECT COUNT(*) FROM voice_turns WHERE sequence=2 AND status='FAILED'")).isEqualTo(1);
+        var polled = restarted().poll(SESSION, "turn-2", PHONE);
+        assertThat(polled.quote()).isEqualTo(replay.quote());
+        assertThat(polled.replyText()).contains("सुन नहीं पाया");
+        assertThat(polled.order()).isNull();
     }
 
     @Test
@@ -364,6 +441,14 @@ class VoiceJournalPostgresTest {
                         .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(body)))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         return json.readTree(reply);
+    }
+
+    private Order fillPickup(String session, String slot) {
+        var quote = booking.quote(new QuoteRequest(session, "Test buyer", PHONE, "kaju-katli", 500, slot)).quote();
+        assertThat(quote.pickupTime()).isEqualTo(slot);
+        var confirmed = booking.accept(quote.id().toString(), new AcceptRequest(session, "yes"), null);
+        assertThat(confirmed.status()).isEqualTo(201);
+        return confirmed.order();
     }
 
     private static void assertOffer(JsonNode reply, int grams, int paise, String pickupTime) {

@@ -34,4 +34,4 @@ psql -X -h "$root" -p "$port" -U test_admin -d postgres -v ON_ERROR_STOP=1 >/dev
 CREATE ROLE shop_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD :'test_password';
 CREATE DATABASE test_db OWNER shop_app;
 SQL
-mvn -B -ntp "$@" -Dtest=OutboxPostgresTest,TwilioWhatsAppTest test
+mvn -B -ntp "$@" -Dtest=OutboxPostgresTest,TwilioWhatsAppTest,NotificationWorkerTest test

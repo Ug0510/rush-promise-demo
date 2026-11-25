@@ -1,11 +1,14 @@
 package com.rushpromise.voice;
 
+import com.rushpromise.platform.SarvamShopRouting;
+import com.rushpromise.platform.TenantContext;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -24,7 +27,9 @@ class VoiceControllerTest {
     private final SarvamSpeech speech = mock(SarvamSpeech.class);
     private final VoiceSessionService sessions = mock(VoiceSessionService.class);
     private final VoiceConversation conversation = mock(VoiceConversation.class);
-    private final VoiceController controller = new VoiceController(speech, sessions, new VoicePrompts(), conversation, BEARER, PHONE);
+    private final SarvamShopRouting routing = mock(SarvamShopRouting.class);
+    private final VoiceController controller = new VoiceController(speech, sessions, new VoicePrompts(), conversation,
+            routing, BEARER, PHONE);
 
     @Test
     void bookingResultsHaveDistinctSavedAudioWhenSpeechSynthesisFails() {
@@ -130,6 +135,39 @@ class VoiceControllerTest {
                     new VoiceController.SarvamTurn(null, malformed, null, 1, null, null, PHONE, "", null)))
                     .isInstanceOf(ResponseStatusException.class).hasMessageContaining("400");
         }
+    }
+
+    @Test
+    void aRoutedCallMustSelectAndItsOriginalShopWinsAnyLaterRetry() {
+        String interaction = "Ab12:CD3/A1b2C3d4E5f6G7h8I9j0KLMNOP";
+        String schema = "shop_" + "1".repeat(32);
+        String deepak = "deepak-mithai-bhandar";
+        String bakery = "virajs-bakery";
+        var route = new SarvamShopRouting.Route(bakery, schema);
+        when(routing.choices()).thenReturn(List.of(new SarvamShopRouting.Choice(bakery, "Viraj's Bakery")));
+        var turn = new VoiceController.SarvamTurn(null, interaction, null, 1, null, null, PHONE, "yes", "en-IN", deepak, true);
+        var ask = (VoiceController.ShopChoiceReply) controller.sarvamTurn("Bearer " + BEARER, turn).getBody();
+        assertThat(ask.state()).isEqualTo("SHOP_SELECTION_REQUIRED");
+        verifyNoInteractions(sessions, speech);
+
+        when(routing.choose(anyString(), eq(deepak))).thenReturn(route);
+        when(conversation.greet("hi-IN")).thenAnswer(call -> {
+            assertThat(TenantContext.schema()).isEqualTo(schema);
+            return new VoiceConversation.Greeting("Viraj's Bakery", "hi-IN", "नमस्ते।");
+        });
+        var change = new VoiceController.SarvamTurn("select-shop", interaction, null, null, null,
+                null, null, null, "hi-IN", deepak, true);
+        var original = (VoiceController.ShopChoiceReply) controller.sarvamTurn("Bearer " + BEARER, change).getBody();
+        assertThat(original.state()).isEqualTo("SHOP_ALREADY_SELECTED");
+        assertThat(original.shopName()).isEqualTo("Viraj's Bakery");
+
+        when(routing.route(anyString())).thenReturn(route);
+        when(sessions.turn(any(), any())).thenAnswer(call -> {
+            assertThat(TenantContext.schema()).isEqualTo(schema);
+            return new VoiceSessionService.Reply("COLLECTING", "yes", "Tell me what you'd like.", "en-IN", null, null);
+        });
+        assertThat(controller.sarvamTurn("Bearer " + BEARER, turn).getStatusCode().value()).isEqualTo(200);
+        assertThat(TenantContext.legacy()).isTrue();
     }
 
     @Test

@@ -63,6 +63,9 @@ spec:
             - {name: SPRING_PROFILES_ACTIVE, value: demo}
             - {name: DEMO_DATE, value: "2026-11-25"}
             - {name: JAVA_TOOL_OPTIONS, value: "-XX:MaxRAMPercentage=70"}
+            - {name: RUSH_SIGNUP_ENABLED, value: "false"}
+            - name: RUSH_DEMO_OWNER_BUNDLE
+              valueFrom: {secretKeyRef: {name: rush-demo-owners, key: bundle, optional: true}}
             - name: SPRING_DATASOURCE_PASSWORD
               valueFrom: {secretKeyRef: {name: shop-db-auth, key: password}}
             - name: SARVAM_API_KEY

@@ -1,6 +1,8 @@
 package com.rushpromise.delivery;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rushpromise.platform.TenantContext;
+import com.rushpromise.platform.TenantDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,14 +19,16 @@ class NotificationWorker {
     private final OutboxRepository outbox;
     private final DeliverySettings settings;
     private final TwilioWhatsApp provider;
+    private final TenantDirectory tenants;
 
-    NotificationWorker(OutboxRepository outbox, DeliverySettings settings, ObjectMapper json,
+    NotificationWorker(OutboxRepository outbox, DeliverySettings settings, ObjectMapper json, TenantDirectory tenants,
                        @Value("${RUSH_WORKER_BOOT:ready}") String boot) {
         if (!boot.equals("ready")) {
             throw new IllegalStateException("Worker startup blocked by this isolated demo revision");
         }
         this.outbox = outbox;
         this.settings = settings;
+        this.tenants = tenants;
         if (settings.live()) {
             settings.requireLiveConfiguration();
         }
@@ -33,27 +37,47 @@ class NotificationWorker {
 
     @Scheduled(fixedDelayString = "${RUSH_WORKER_POLL_MS:750}")
     void poll() {
-        var claim = outbox.claim(settings.live(), settings.liveRecipient());
+        forEachQueue(this::deliverOne);
+    }
+
+    private void deliverOne() {
+        boolean live = TenantContext.legacy() && settings.live();
+        String recipient = live ? settings.liveRecipient() : "";
+        var claim = outbox.claim(live, recipient);
         if (claim == null) {
             return;
         }
-        var dispatch = outbox.begin(claim, settings.live(), settings.liveRecipient());
+        var dispatch = outbox.begin(claim, live, recipient);
         if (dispatch == null) {
             return;
         }
 
-        if (!outbox.stillCurrent(dispatch, settings.live())) {
+        if (!outbox.stillCurrent(dispatch, live)) {
             outbox.observe(dispatch.attemptId(), new DeliveryResult("SUPPRESSED", null, "ORDER_STATE_CHANGED"));
             return;
         }
-        DeliveryResult outcome = provider == null
-            ? new DeliveryResult("SIMULATED", null, null) : provider.send(dispatch);
+        DeliveryResult outcome = live ? provider.send(dispatch) : new DeliveryResult("SIMULATED", null, null);
         outbox.observe(dispatch.attemptId(), outcome);
         log.info("Notification {} kind={} outcome={}", dispatch.messageId(), dispatch.kind(), outcome.status());
     }
 
     @Scheduled(fixedDelay = 5000)
     void recover() {
-        outbox.recoverLeases();
+        forEachQueue(outbox::recoverLeases);
+    }
+
+    private void forEachQueue(Runnable task) {
+        runInQueue(TenantContext.LEGACY, task);
+        for (String schema : tenants.activeSchemas()) {
+            runInQueue(schema, task);
+        }
+    }
+
+    private void runInQueue(String schema, Runnable task) {
+        try (TenantContext.Scope ignored = TenantContext.enter(schema)) {
+            task.run();
+        } catch (RuntimeException failure) {
+            log.warn("Notification queue processing failed in {}: {}", schema, failure.getClass().getSimpleName());
+        }
     }
 }

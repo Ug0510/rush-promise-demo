@@ -14,7 +14,11 @@ data:
       proxy_connect_timeout 3s;
       proxy_read_timeout 25s;
       proxy_set_header Host $host;
+      proxy_set_header Forwarded "";
+      proxy_set_header X-Forwarded-Host $host;
       proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header X-Forwarded-Port 443;
+      proxy_set_header X-Forwarded-Prefix "";
       add_header X-Content-Type-Options nosniff always;
       add_header Permissions-Policy "microphone=(self), camera=()" always;
 
@@ -27,6 +31,14 @@ data:
         proxy_pass http://rush-promise-web:8080;
       }
       location = /voice-ui/caller.js {
+        if ($request_method != GET) { return 405; }
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location = /api/storefront/deepak-mithai-bhandar {
+        if ($request_method != GET) { return 405; }
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location = /api/storefront/virajs-bakery {
         if ($request_method != GET) { return 405; }
         proxy_pass http://rush-promise-web:8080;
       }

@@ -3,6 +3,8 @@ package com.rushpromise.booking;
 import static com.rushpromise.booking.BookingModels.*;
 import static com.rushpromise.booking.BookingStore.*;
 
+import com.rushpromise.platform.TenantContext;
+import com.rushpromise.platform.TenantDirectory;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -22,20 +24,30 @@ import java.util.UUID;
 @Profile("!worker")
 public class ShopService {
     private static final String SUPPRESSIBLE = "('QUEUED', 'CLAIMED', 'FAILED_RETRYABLE', 'RETRY')";
+    private static final String NOTICE_FIELDS = """
+            m.id,m.kind,m.status,m.created_at,m.updated_at,CASE
+                WHEN EXISTS (SELECT 1 FROM notification_live_grant g WHERE g.run_id=m.run_id AND g.order_id=m.order_id) THEN NULL
+                WHEN m.status='NEEDS_REVIEW' THEN 'REVIEW'
+                WHEN m.status='FAILED_RETRYABLE' OR (m.status='FAILED' AND m.last_error='RETRY_EXHAUSTED') THEN 'RETRY'
+                WHEN m.status='FAILED' THEN 'CHECK_RECIPIENT'
+            END AS manual_action
+            """;
     private final BookingStore store;
     private final BookingService booking;
     private final TransactionTemplate transactions;
     private final DemoFixture fixture;
+    private final TenantDirectory tenants;
 
-    ShopService(BookingStore store, BookingService booking, TransactionTemplate transactions, DemoFixture fixture) {
+    ShopService(BookingStore store, BookingService booking, TransactionTemplate transactions, DemoFixture fixture, TenantDirectory tenants) {
         this.store = store;
         this.booking = booking;
         this.transactions = transactions;
         this.fixture = fixture;
+        this.tenants = tenants;
     }
 
     public List<Order> orders() {
-        return store.db.query("SELECT * FROM orders ORDER BY pickup_at, id", store::orderRow);
+        return store.db.query("SELECT * FROM orders WHERE id>0 ORDER BY pickup_at, id", store::orderRow);
     }
 
     public Map<String, Object> stock() {
@@ -46,10 +58,8 @@ public class ShopService {
     public Map<String, Object> snapshot(Policy policy) {
         var shop = store.shop();
         Map<Long, List<Map<String, Object>>> deliveries = new LinkedHashMap<>();
-        store.db.query("""
-                SELECT order_id,id,kind,status,created_at,updated_at FROM outbox_messages
-                WHERE run_id=? ORDER BY order_id,created_at,id
-                """, r -> {
+        store.db.query("SELECT m.order_id," + NOTICE_FIELDS + " FROM outbox_messages m"
+                + " WHERE m.run_id=? ORDER BY m.order_id,m.created_at,m.id", r -> {
             deliveries.computeIfAbsent(r.getLong("order_id"), key -> new ArrayList<>()).add(messageView(r));
         }, shop.runId());
         return Map.of("orders", orders(), "stock", stock(shop), "policy", policy, "deliveries", deliveries, "shop", profile());
@@ -59,31 +69,40 @@ public class ShopService {
         return store.profile();
     }
 
+    @Transactional
     public ShopProfile updateProfile(String value) {
         String name = value == null ? "" : value.strip();
         if (name.isBlank() || name.codePointCount(0, name.length()) > 70
                 || name.codePoints().anyMatch(cp -> Character.isISOControl(cp) || Character.getType(cp) == Character.FORMAT)) {
             throw new IllegalArgumentException("Enter a shop name of 1 to 70 visible characters");
         }
-        return store.saveProfile(name);
+        var updated = store.saveProfile(name);
+        if (!TenantContext.legacy()) {
+            store.db.update("UPDATE public.rush_tenants SET display_name=? WHERE schema_name=current_schema()", name);
+        }
+        return updated;
     }
 
     List<Map<String, Object>> messages(long id) {
-        return store.db.query("SELECT id,kind,status,created_at,updated_at FROM outbox_messages WHERE order_id = ? ORDER BY created_at,id",
+        return store.db.query("SELECT " + NOTICE_FIELDS + " FROM outbox_messages m JOIN shop_state s ON s.run_id=m.run_id"
+                        + " WHERE m.order_id=? ORDER BY m.created_at,m.id",
                 (row, index) -> messageView(row), id);
     }
 
     private Map<String, Object> messageView(java.sql.ResultSet row) throws java.sql.SQLException {
-        return Map.of("id", row.getString("id"), "kind", row.getString("kind"), "status", row.getString("status"),
-                "createdAt", at(row, "created_at"), "updatedAt", at(row, "updated_at"));
+        Map<String, Object> view = new LinkedHashMap<>(Map.of("id", row.getString("id"), "kind", row.getString("kind"),
+                "status", row.getString("status"), "createdAt", at(row, "created_at"), "updatedAt", at(row, "updated_at")));
+        String action = row.getString("manual_action");
+        if (action != null) view.put("manualAction", action);
+        return view;
     }
 
     private Map<String, Object> stock(Shop shop) {
-        var batches = store.db.query("SELECT * FROM batches ORDER BY id", (r, n) -> Map.of(
+        var batches = store.db.query("SELECT * FROM batches WHERE id<>? ORDER BY id", (r, n) -> Map.of(
                 "id", r.getString("id"), "sku", r.getString("sku"), "status", r.getString("status"),
                 "readyAt", at(r, "ready_at"), "readyTime", shopTime(at(r, "ready_at")),
                 "phoneGramsTotal", r.getInt("phone_grams_total"), "phoneGramsFree", r.getInt("phone_grams_free"),
-                "counterGramsCounted", r.getInt("counter_grams_counted"), "blocked", r.getBoolean("blocked")));
+                "counterGramsCounted", r.getInt("counter_grams_counted"), "blocked", r.getBoolean("blocked")), DemoFixture.POLICY_SEAT_BATCH);
         var slots = store.db.query("SELECT * FROM pickup_slots ORDER BY pickup_at", (r, n) -> Map.of(
                 "pickupAt", at(r, "pickup_at"), "pickupTime", shopTime(at(r, "pickup_at")),
                 "capacity", r.getInt("capacity"), "used", r.getInt("used")));
@@ -91,6 +110,7 @@ public class ShopService {
     }
 
     public Outcome action(long id, String action, Integer grams) {
+        if (id <= 0) return Outcome.error(404, "ORDER_NOT_FOUND", null);
         return transactions.execute(transaction -> {
             var shop = store.shop();
             var order = lockOrder(id);
@@ -182,6 +202,16 @@ public class ShopService {
 
     @Scheduled(fixedDelayString = "${rush.approvals.sweep-ms:2000}")
     public void expireApprovals() {
+        expireWithinShop();
+        if (!TenantContext.legacy()) return;
+        for (String schema : tenants.activeSchemas()) {
+            try (var ignored = TenantContext.enter(schema)) {
+                expireWithinShop();
+            }
+        }
+    }
+
+    private void expireWithinShop() {
         List<PendingOrder> ids = store.db.query("""
                 SELECT o.id, o.run_id FROM orders o CROSS JOIN shop_clock s
                 WHERE o.status = 'AWAITING_APPROVAL' AND o.approval_expires_at <= CASE WHEN ? THEN s.now ELSE statement_timestamp() END AND o.run_id = s.run_id
@@ -223,6 +253,7 @@ public class ShopService {
     }
 
     public Outcome batchAction(String id, String action, Integer grams) {
+        if (DemoFixture.POLICY_SEAT_BATCH.equals(id)) return Outcome.error(404, "BATCH_NOT_FOUND", null);
         return transactions.execute(transaction -> {
             var shop = store.shop();
             if (!lockBatch(id)) return Outcome.error(404, "BATCH_NOT_FOUND", null);
@@ -278,6 +309,15 @@ public class ShopService {
             if (booked.status() != 201) throw new IllegalStateException("Incident fixture booking failed");
             store.db.update("UPDATE outbox_messages SET status = 'DELIVERED' WHERE order_id = ? AND kind = 'CONFIRMED'", booked.order().id());
             return new Outcome(200, "INCIDENT_SEEDED", null, null, booked.order());
+        });
+    }
+
+    public Outcome setupPolicyFixture() {
+        if (!fixture.enabled() || !booking.slotPolicyEnabled()) return Outcome.error(404, "DEMO_UNAVAILABLE", null);
+        return transactions.execute(transaction -> {
+            fixture.lock();
+            String code = fixture.addPolicySeats();
+            return Outcome.error("POLICY_FIXTURE_CONFLICT".equals(code) ? 409 : 200, code, null);
         });
     }
 

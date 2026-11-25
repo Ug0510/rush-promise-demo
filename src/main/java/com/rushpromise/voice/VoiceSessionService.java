@@ -1,5 +1,6 @@
 package com.rushpromise.voice;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.rushpromise.booking.BookingService;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataAccessException;
@@ -155,7 +156,17 @@ class VoiceSessionService {
             return Decision.plain(render("COLLECTING", spoken, info + " " + currentPrompt(session, spoken).replyText(),
                     session.hindi ? "hi-IN" : "en-IN", null, null));
         }
-        var intent = SpeechIntent.parse(spoken);
+        var words = conversation.orderWords(spoken, session.sku);
+        var intent = words.parsed();
+        if (words.wrongUnit()) {
+            session.quote = null;
+            session.grams = null;
+            if (intent.sku() != null) session.sku = intent.sku();
+            session.unit = words.unit();
+            if (intent.pickupTime() != null) session.pickupTime = intent.pickupTime();
+            return Decision.plain(localized(session, "COLLECTING", spoken, "That item is sold by the piece. How many pieces would you like?",
+                    "यह आइटम पीस में बिकता है। आपको कितने पीस चाहिए?", null, null));
+        }
         if (intent.decision() == UNCLEAR) {
             if (++session.unclearTurns < 2) return Decision.plain(unavailable(session));
             session.quote = null;
@@ -178,7 +189,11 @@ class VoiceSessionService {
             return new Decision(uncertainReply(session, spoken), session.quote.id(), false, false);
         }
 
-        if (intent.sku() != null) session.sku = intent.sku();
+        if (intent.sku() != null) {
+            if (session.unit != null && !session.unit.equals(words.unit())) session.grams = null;
+            session.sku = intent.sku();
+            session.unit = words.unit();
+        }
         if (intent.grams() != null) session.grams = intent.grams();
         if (intent.pickupTime() != null) session.pickupTime = intent.pickupTime();
         session.quote = null;
@@ -199,7 +214,7 @@ class VoiceSessionService {
         session.quote = outcome.quote();
         if (outcome.order() != null) {
             var order = outcome.order();
-            session.order = new SavedOrder(order.id(), order.itemName(), order.grams(), order.pricePaise(), order.pickupTime(), order.status());
+            session.order = savedOrder(order);
             long number = session.order.id();
             boolean approval = "AWAITING_APPROVAL".equals(session.order.status());
             String time = spokenTime(session.order.pickupTime());
@@ -207,20 +222,24 @@ class VoiceSessionService {
                     approval ? "Request " + number + " is waiting for shop approval."
                             : "Confirmed. Your order number is " + number + ". Pickup at " + time + ".",
                     approval ? "नंबर " + number + " दुकान की मंज़ूरी का इंतज़ार कर रहा है।"
-                            : "ऑर्डर पक्का है। आपका ऑर्डर नंबर " + number + " है। पिकअप " + time + " बजे है।",
+                            : "ऑर्डर पक्का है। आपका ऑर्डर नंबर " + number + " है। "
+                                    + VoiceConversation.hindiTime(session.order.pickupTime()) + " पिकअप कर लीजिए।",
                     null, order);
         }
         if (session.quote != null) {
             session.sku = session.quote.sku();
             session.grams = session.quote.grams();
+            session.unit = session.quote.unit();
             session.pickupTime = session.quote.pickupTime();
             return readback(session, transcript, outcome.code(), outcome.reason());
         }
         return switch (outcome.code()) {
             case "UNSUPPORTED_WEIGHT" -> unsupportedWeight(session, transcript);
             case "TOO_LARGE" -> localized(session, "COLLECTING", transcript,
-                    "That weight isn't available. Try 250 grams, 500 grams, or a whole kilo amount.",
-                    "यह वज़न उपलब्ध नहीं है। ढाई सौ ग्राम, आधा किलो, या पूरे किलो का वज़न बताइए।", null, null);
+                    "PIECE".equals(session.unit) ? "That many pieces aren't available. Ask for a smaller amount."
+                            : "That weight isn't available. Try 250 grams, 500 grams, or a whole kilo amount.",
+                    "PIECE".equals(session.unit) ? "इतने पीस उपलब्ध नहीं हैं। कम पीस बताइए।"
+                            : "यह वज़न उपलब्ध नहीं है। ढाई सौ ग्राम, आधा किलो, या पूरे किलो का वज़न बताइए।", null, null);
             case "PENDING_APPROVAL_LIMIT" -> localized(session, "COLLECTING", transcript,
                     "This number already has an order awaiting shop approval.",
                     "इस नंबर पर एक ऑर्डर पहले से दुकान की मंज़ूरी का इंतज़ार कर रहा है।", null, null);
@@ -245,7 +264,8 @@ class VoiceSessionService {
                 "Tell me which sweet you'd like, or ask what is available.",
                 "बताइए आपको कौन सी मिठाई चाहिए, या पूछिए अभी क्या मिल सकता है।", null, null);
         if (session.grams == null) return localized(session, "COLLECTING", transcript,
-                "How much would you like?", "आपको कितना वज़न चाहिए?", null, null);
+                "PIECE".equals(session.unit) ? "How many pieces would you like?" : "How much would you like?",
+                "PIECE".equals(session.unit) ? "आपको कितने पीस चाहिए?" : "आपको कितना वज़न चाहिए?", null, null);
         if (session.pickupTime == null) return localized(session, "COLLECTING", transcript,
                 "What time would you like to pick it up?", "आप कितने बजे पिकअप करेंगे?", null, null);
         return localized(session, "COLLECTING", transcript,
@@ -261,13 +281,19 @@ class VoiceSessionService {
                 : reason != null ? "There's a different pickup available. " : "";
         String hindiLead = "TERMS_CHANGED".equals(code) ? "दुकान की शर्तें बदल गई हैं। "
                 : reason != null ? "एक दूसरा पिकअप समय उपलब्ध है। " : "";
-        String english = englishLead + quote.grams() + " grams of " + quote.itemName() + ", " + amount
-                + " rupees, pickup at " + time + ". "
-                + (quote.requiresApproval() ? "This needs shop approval. " : "") + "Say yes to confirm.";
-        String item = "barfi".equals(quote.sku()) ? "बर्फी" : "काजू कतली";
-        String hindi = hindiLead + quote.grams() + " ग्राम " + item + ", " + amount + " रुपये, पिकअप "
-                + time + " बजे। " + (quote.requiresApproval() ? "इसके लिए दुकान की मंज़ूरी चाहिए। " : "")
-                + "पक्का करने के लिए हाँ कहिए।";
+        var slot = quote.policy().slot();
+        String englishWhy = slot != null ? voicedReason(slot.why())
+                : quote.requiresApproval() ? "This needs shop approval. " : "";
+        String hindiWhy = slot != null ? voicedReason(slot.whyHindi())
+                : quote.requiresApproval() ? "इसके लिए दुकान की मंज़ूरी चाहिए। " : "";
+        String ask = quote.requiresApproval() ? "Say yes to request shop approval." : "Say yes to confirm.";
+        String askHindi = quote.requiresApproval() ? "अनुरोध भेज दूँ? हाँ कहिए।"
+                : "बुक कर दूँ? पक्का करने के लिए हाँ कहिए।";
+        String english = englishLead + VoiceConversation.amount(quote.grams(), quote.unit(), false) + " of " + quote.itemName() + ", " + amount
+                + " rupees, pickup at " + time + ". " + englishWhy + ask;
+        String item = VoiceConversation.spokenItem(quote.itemName(), true);
+        String hindi = hindiLead + VoiceConversation.amount(quote.grams(), quote.unit(), true) + " " + item + ", " + amount + " रुपये। "
+                + VoiceConversation.hindiTime(quote.pickupTime()) + " पिकअप मिल सकता है। " + hindiWhy + askHindi;
         return localized(session, "AWAITING_CONFIRMATION", transcript, english, hindi, quote, null);
     }
 
@@ -281,6 +307,22 @@ class VoiceSessionService {
         return LocalTime.parse(time).format(SPOKEN_TIME);
     }
 
+    private static String voicedReason(String text) {
+        if (text == null || text.isBlank()) return "";
+        String reason = text.strip();
+        return reason + (reason.endsWith(".") || reason.endsWith("।") ? " " : ". ");
+    }
+
+    private static RecordedDecision decision(Policy policy) {
+        var slot = policy == null ? null : policy.slot();
+        return slot == null ? null : new RecordedDecision(slot.profile(), slot.digest(), policy.source(), policy.fetchedAt());
+    }
+
+    private static SavedOrder savedOrder(Order order) {
+        return new SavedOrder(order.id(), order.itemName(), order.grams(), order.pricePaise(), order.pickupTime(),
+                order.status(), order.unit(), decision(order.policy()));
+    }
+
     private static Reply localized(Session session, String state, String transcript,
                                    String english, String hindi, Quote quote, Order order) {
         return render(state, transcript, session.hindi ? hindi : english, session.hindi ? "hi-IN" : "en-IN", quote, order);
@@ -289,9 +331,8 @@ class VoiceSessionService {
     private static Reply render(String state, String transcript, String text, String language, Quote quote, Order order) {
         return new Reply(state, transcript, text, language,
                 quote == null ? null : new Offer(quote.id(), quote.itemName(), quote.grams(), quote.pricePaise(),
-                        quote.pickupTime(), quote.requiresApproval(), quote.expiresAt()),
-                order == null ? null : new SavedOrder(order.id(), order.itemName(), order.grams(),
-                        order.pricePaise(), order.pickupTime(), order.status()));
+                        quote.pickupTime(), quote.requiresApproval(), quote.expiresAt(), quote.unit(), decision(quote.policy())),
+                order == null ? null : savedOrder(order));
     }
 
     @FunctionalInterface
@@ -300,8 +341,20 @@ class VoiceSessionService {
     }
 
     record Turn(String sessionId, String turnId, int sequence, UUID confirmationQuoteId, String customerName, String phone) {}
-    record Offer(UUID id, String itemName, int grams, int pricePaise, String pickupTime, boolean requiresApproval, Instant expiresAt) {}
-    record SavedOrder(long id, String itemName, int grams, int pricePaise, String pickupTime, String status) {}
+    record RecordedDecision(String profile, String digest, String source, Instant fetchedAt) {}
+    record Offer(UUID id, String itemName, int grams, int pricePaise, String pickupTime, boolean requiresApproval, Instant expiresAt,
+                 String unit, RecordedDecision decision) {
+        @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+        public int quantity() { return grams; }
+    }
+    record SavedOrder(long id, String itemName, int grams, int pricePaise, String pickupTime, String status, String unit,
+                      RecordedDecision decision) {
+        SavedOrder(long id, String itemName, int grams, int pricePaise, String pickupTime, String status) {
+            this(id, itemName, grams, pricePaise, pickupTime, status, "GRAMS", null);
+        }
+        @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+        public int quantity() { return grams; }
+    }
     record Reply(String state, String transcript, String replyText, String language, Offer quote, SavedOrder order) {}
     static final class VoiceBusy extends RuntimeException {}
 }

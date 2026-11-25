@@ -38,6 +38,9 @@ final class SpeechIntent {
             + "\\s*(kilograms?|kilos?|kgs?|किलोग्राम|किलो|केजी|grams?|gms?|g|ग्राम)(?!" + BOUNDARY + ")");
     private static final Pattern ITEM = Pattern.compile("काजू(?:\\s*कतली)?|kaju(?:[ -]*katli)?|"
             + "kaaju(?:[ -]*katli)?|cashew katli|बर्फ़ी|बर्फी|burfi|barfi");
+    private static final String PIECE_COUNT = "(\\d{1,5}|one|two|three|four|five|ek|do|teen|char|chaar|paanch|एक|दो|तीन|चार|पाँच|पांच)";
+    private static final Pattern PIECES = Pattern.compile("(?<!" + BOUNDARY + ")" + PIECE_COUNT
+            + "\\s*(?:pieces?|units?|pc?s|पीस|नग)(?!" + BOUNDARY + ")");
     private static final String SIX = "chhe|chhah|chah|che|six|छह|छः|छे|छ";
     private static final String SEVEN = "saat|sat|seven|सात";
     private static final String EIGHT = "aath|ath|eight|आठ";
@@ -103,6 +106,31 @@ final class SpeechIntent {
         }
         return new Intent(item != null || grams != null || pickup != null ? Decision.ORDER : Decision.UNCLEAR,
                 item, grams, pickup);
+    }
+
+    static Integer pieces(String spoken, String itemName) {
+        String text = words(spoken);
+        var quantity = PIECES.matcher(text);
+        Integer count = null;
+        while (quantity.find()) count = count(quantity.group(1));
+        if (count != null) return count;
+        String item = itemName == null ? "" : words(itemName);
+        if (!item.isEmpty()) {
+            var followedByItem = Pattern.compile("(?<!" + BOUNDARY + ")" + PIECE_COUNT + "\\s+(?:of\\s+)?"
+                    + Pattern.quote(item) + "s?(?!" + BOUNDARY + ")").matcher(text);
+            while (followedByItem.find()) count = count(followedByItem.group(1));
+        }
+        var simple = Pattern.compile("^(?:(?:actually|instead|नहीं|बस) )?" + PIECE_COUNT + "(?: please| चाहिए)?$").matcher(text);
+        return count != null ? count : simple.matches() ? count(simple.group(1)) : null;
+    }
+
+    static String words(String spoken) {
+        return asciiDigits(Normalizer.normalize(spoken, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT))
+                .replaceAll("[\\p{Cf}]", "").replaceAll("[^\\p{L}\\p{M}\\p{N}]+", " ").strip();
+    }
+
+    private static int count(String value) {
+        return Integer.parseInt(QUANTITY_WORDS.getOrDefault(value, value));
     }
 
     private static String clock(int hours, int minutes, String marker) {

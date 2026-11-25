@@ -1,6 +1,6 @@
 # Rush Promise
 
-Voice ordering for mithai shops. A caller corrects an order in Hindi, hears the price and pickup time, and says yes. Rush Promise reserves the physically set-aside stock and pickup place together. If the last box is gone, it offers a later pickup from a weighed tray. Staff can pack the order and follow its notices to the customer.
+Voice ordering and pickup for independent shops. Each owner sets up a shop, prices its own menu, and records stock set aside for pickup. A customer hears the price and pickup time before confirming. Rush Promise reserves the stock and pickup place together, while staff pack the order and follow its notices.
 
 ## Run it locally
 
@@ -31,6 +31,14 @@ Reuse an existing PostgreSQL 16 instance by setting the three `SPRING_DATASOURCE
 - [Caller](http://127.0.0.1:8080/caller) uses the microphone and displays the transcript, read-back, and booking result. On a separate handset, use the approved public **HTTPS** gateway.
 - [Staff](http://127.0.0.1:8080/staff) uses the live inventory, pickup capacity, orders, and delivery states. Enter the appropriate role token from your private terminal. Staff access stays on a private web connection.
 - [Health](http://127.0.0.1:8080/actuator/health) confirms the local process and database are available.
+
+### Run two separate shops
+
+On the private local web connection, open `/owner`, create an owner login, and choose a shop name and link. A new shop starts with an empty catalog. Add an item with a price in rupees per kilogram or per piece and record the quantity physically set aside. You can also enter an optional area, opening hours and pickup instructions. The same-day pickup windows come from stock and slot availability. The opening-hours text is shown to buyers.
+
+Use `/caller?shop=<slug>` to open a buyer page. The public `GET /api/storefront/<slug>` shows the named shop and its menu with example prices and eligible times for available stock and weighed future trays. The shop link does not change the account scope for owner actions. Owners have separate products, stock, orders, voice turns and notification jobs. Owner cookies expire and a sign-out revokes the server session. Private edits require the session's CSRF token.
+
+The local default allows signup. The stage uses `RUSH_SIGNUP_ENABLED=false` and a protected two-account handoff supplied in `RUSH_DEMO_OWNER_FILE` or `RUSH_DEMO_OWNER_BUNDLE`. Deepak Mithai Bhandar and Viraj's Bakery carry explicitly labelled demo stock and prices. The private owner portal uses the separate web forward. The public gateway permits the two buyer pages and their storefront data. Merchant notifications use the console transport. The original one-order WhatsApp proof uses the isolated legacy shop grant.
 
 ### Try the last box without a microphone
 
@@ -77,7 +85,7 @@ Load live credentials from an environment or secret manager. For the hosted demo
 | Integration | Runtime settings and entry point |
 |---|---|
 | **Sarvam AI** | `SARVAM_API_KEY`. `/caller` sends multipart audio to `POST /api/voice/browser/turn`. Saaras v4 transcribes the input and Bulbul v4 Flash speaks the reply. `RUSH_DEMO_HANDSET` restricts the hosted browser to the enrolled stage number when set. |
-| **Flagsmith** | `FLAGSMITH_ENVIRONMENT_KEY`; optional `FLAGSMITH_API_URL` for self-hosting. Create server-only `rush_mode` OFF in Development. Hosted reads use the Core Flags API and verify the `X-Flagsmith-Document-Updated-At` revision header. The demo refreshes every five seconds, publishes version, provider revision and last successful fetch, and retains that state across restart. An older or contradictory revision leaves the last verified policy in place. With no verified policy the app starts in conservative rush mode. |
+| **Flagsmith** | `FLAGSMITH_ENVIRONMENT_KEY`; optional `FLAGSMITH_API_URL` for the legacy self-hosted switch. The hosted Development switch belongs to the platform operator. Merchant owners see policy facts for their own orders. The optional `RUSH_SLOT_POLICY_ENABLED=true` mode evaluates `promise_profile` against one captured Development document and actual pickup occupancy. Quote and order history show the selected rule, evidence source, digest and the slot's use before the booking. |
 | **Twilio WhatsApp Sandbox** | Keep `NOTIFIER=console` for local simulations. The isolated live worker uses `NOTIFIER=twilio` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_MSG_FROM`, `RUSH_PUBLIC_BASE_URL`, and the enrolled `RUSH_DEMO_HANDSET`. The signed status endpoint is `POST /webhooks/twilio/status`. Follow the one-order release procedure in [ops/README.md](ops/README.md). |
 | **NudgeBee** | The cluster agent relays the Prometheus/Alertmanager queue signal. See [ops/README.md](ops/README.md) for the isolated worker outage, approval reference and recovery commands. |
 | **Sarvam phone tool** | `RUSH_SARVAM_TOOL_TOKEN` for the bearer-protected `POST /api/voice/sarvam/turn`. The tool can consume a provider transcript and share the booking engine. An active verified inbound phone line and attached provider agent are a separate setup. The browser is the current speech path. |
@@ -94,7 +102,7 @@ kubectl -n dev-data port-forward --address 127.0.0.1 svc/rush-promise-gateway 18
 kubectl -n dev-data port-forward --address 127.0.0.1 svc/rush-promise-web 18082:8080
 ```
 
-The stage caller uses `/caller` on the approved HTTPS origin for port 18081. That gateway serves only the caller page and assets, the voice POST paths and the signed Twilio status endpoint. Staff uses `/staff` on the private port 18082. Order APIs, reset, metrics and PostgreSQL stay private. See the [one-order release and operator recovery procedure](ops/README.md#one-live-order) before enabling delivery to the enrolled handset.
+The stage caller uses `/caller` on the approved HTTPS origin for port 18081. The gateway serves the caller page and assets, the two approved storefronts, the voice POST paths and the signed Twilio status endpoint. Staff and owners use `/staff` and `/owner` on the private port 18082. Signup, owner APIs, order APIs, reset, metrics and PostgreSQL stay private. See the [one-order release and operator recovery procedure](ops/README.md#one-live-order) before enabling delivery to the enrolled handset.
 
 ## The three demo moments
 
@@ -104,11 +112,19 @@ The stage caller uses `/caller` on the approved HTTPS origin for port 18081. Tha
 
 Set hosted `rush_mode` off before restoring the normal fixture. `POST /ops/demo/reset` with the operator token recreates the fixture and order sequence. A body of `{"preset":"incident","phone":"<enrolled E.164>"}` seeds `4821` and marks its fixture confirmation delivered. That fixture is useful for rehearsal. For an actual receipt use the live-order procedure and record the customer’s observed handset result.
 
+### Compare a busy and a quieter pickup
+
+For the per-slot policy demo, use a disposable database running the `demo` profile with the slot policy enabled. `POST /ops/demo/policy-fixture` with the operator token installs eight synthetic 500 g confirmed holds backed by a separate tray. It preserves prior order IDs and puts no notification jobs in the queue. The 7:30 PM slot starts at 4/5, the 8:00 PM slot at 4/10, and 6.5 kg of barfi remains available for the exercise.
+
+Start with Rush off and quote 4 kg barfi at 8:00 PM. The platform operator enables Rush in hosted Development. Wait for the staff view to show the new live digest, then reply yes to the old quote. The caller hears the updated approval terms and has to agree again. Then ask for 2.5 kg barfi at 7:30 PM and 8:00 PM in one session. The first time is at 80% load and needs approval. The second has room under the Rush rule and can be confirmed. The owner view compares the actual saved offers and their reasons.
+
 ## Why two callers cannot book the last box
 
-PostgreSQL locks the selected tray and time slot in the same transaction. It checks grams, the 15-minute preparation buffer, capacity and the current order terms before inserting an order. The transaction writes the reservation, event, terminal booking decision and outbox job together. A rejected quote can include a persisted alternative. The database keeps each accepted quote unique, even if two clients choose different idempotency keys. Retrying a lost response reads the same decision. Prices are stored in paise and stock in grams.
+PostgreSQL locks the selected tray and time slot in the same transaction. It checks the number of grams or pieces, the 15-minute preparation buffer, capacity and the current order terms before inserting an order. The transaction writes the reservation, event, terminal booking decision and outbox job together. A rejected quote can include a persisted alternative. The database keeps each accepted quote unique, even if two clients choose different idempotency keys. Retrying a lost response reads the same decision. Prices are stored in paise. Each merchant has a separate database schema, selected by the validated owner session, shop link or shop-specific native voice credential. Schema provisioning requires database-level `CREATE` for the application role.
 
-The original order retains its policy snapshot. Fresh quotes use the result of the latest coherent Flagsmith decision. Bulk approval holds are limited to one pending request per phone. Approval, expiry, and packing transitions serialize with stock updates. An uncertain delivery response waits for evidence before any resend.
+The original order retains its policy snapshot. The per-slot mode locks and rereads the same capacity row that it will update. It evaluates the captured rules before applying any stock or capacity change. A different approval requirement, approval hold or price requires a new yes. A refresh that changes only the digest or quote lifetime leaves an unexpired offer valid. Bulk approval holds are limited to one pending request per phone and end by the pickup preparation cutoff. Approval, expiry, and packing transitions serialize with stock updates.
+
+The private owner desk can requeue an eligible rate-limit failure or review an uncertain notice. An uncertain resend requires the owner's confirmation. PostgreSQL checks the current order and recorded provider receipts again while saving the decision. The one-order live demonstration grant does not permit a manual resend.
 
 A PostgreSQL voice journal stores the current prompt and binds the customer's yes to its quote before requesting a booking. Turn leases fence late results. If the web process stops after assent, its replacement reuses the same booking key. While the booking is being resolved, the browser polls the same route for its receipt without retranscribing. Audio and raw transcripts stay in the request. A lost audio request before durable assent needs the same turn's audio to be sent again. The private staff API supplies a full order, stock, policy and delivery snapshot. Its staff event stream sends change signals and a heartbeat. A reconnect can fetch a fresh snapshot even if a booking committed while the connection was down.
 
@@ -125,6 +141,7 @@ RUSH_TEST_JDBC_USER=rush RUSH_TEST_JDBC_PASSWORD="$SPRING_DATASOURCE_PASSWORD" \
 
 ### Event build evidence · 25 November 2026
 
+- **Two isolated merchant accounts** (08:09:39 UTC / 13:39:39 IST). A replacement Java process on PostgreSQL 16.13 reopened the two private owner accounts. A 500 g order at ₹600 and a two-piece order at ₹160 shared the same synthetic buyer, SKU, callback key and order number across separate shops. Each owner retained its own stock, order and queued confirmation. Signup stayed closed and the server rejected the revoked cookie. A separate V5-to-V7 upgrade at 08:13:01 UTC (13:43:01 IST) preserved the preexisting synthetic legacy order, exact delivery grant and outbox snapshot while provisioning the two shops. The two local checks dispatched no external messages.
 - **Hosted Flagsmith revision guard** (`daa1a17`). During the controlled retry the dashboard requested rush ON at 07:51:23.065 UTC (13:21:23.065 IST). The app applied the new Core revision at 07:51:27.526 UTC, 4.461 seconds later. From 07:51:28.915 UTC it received and ignored older, normal-version responses. The old 4 kg assent returned 409, the replacement required approval, and fresh assent created a pending request. The earlier packed order retained its normal snapshot. The app accepted the later intended OFF at provider revision 07:52:39.897743 UTC. An isolated regression injects stale OFF, conflicting equal revisions, a restart and stale ON after a newer OFF.
 - **Hosted Flagsmith and booking** (`331fcea`, PostgreSQL 16.13). The application read the hosted Development `rush_mode` OFF at 06:41:46 UTC (12:11:46 IST) and ON at 06:42:28 UTC (12:12:28 IST). A waiting fixture quote for 4 kg barfi changed to `409 TERMS_CHANGED`. Repeating the old acceptance returned the same replacement. A fresh yes created pending order `4822`; previously packed `4821` kept its normal-policy snapshot. The app read the restored OFF state at 06:43:14 UTC (12:13:14 IST). Both flag changes used Flagsmith Cloud. Quote and order inputs were fixtures.
 - **PostgreSQL booking load** (`2da3d87`, `mvn -B -Dtest=BookingPostgresTest test`, 06:51 UTC / 12:21 IST). C04 ran 50 independent two-buyer races. L01 used 200 buyers against 10,000 g. Exactly 20 committed and 180 received conflicts, with no stock or slot violations. Mean batch-lock query time was 18.02 ms including database round-trip. Booking request latency was 464.91 ms p50 and 710.49 ms p95. The group of requests finished in 775.29 ms. Replaying each request twice preserved the same 20 orders and queued messages. These timings cover booking requests; the 20-notification delivery drain was unmeasured in this run.

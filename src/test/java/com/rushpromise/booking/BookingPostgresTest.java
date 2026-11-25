@@ -35,6 +35,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -67,6 +68,7 @@ class BookingPostgresTest {
     @Autowired ObjectMapper json;
     @Autowired MockMvc mvc;
     @MockitoBean PolicyService policy;
+    @MockitoBean SlotPolicyProvider slotPolicies;
 
     @BeforeEach
     void reset() {
@@ -102,6 +104,11 @@ class BookingPostgresTest {
         shop.reset(null);
         assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
         assertThat(amount("A")).isEqualTo(500);
+        assertThat(amount("B")).isEqualTo(1000);
+        assertThat(count("SELECT SUM(used)::int FROM pickup_slots")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM booking_keys")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM booking_sessions")).isZero();
         assertThat(accept(quote(3, "kaju-katli", 500, "18:30")).order().id()).isEqualTo(4821);
     }
 
@@ -138,6 +145,195 @@ class BookingPostgresTest {
         when(policy.current()).thenReturn(new Policy(prior.version(), prior.source(), prior.fetchedAt(), prior.evaluatedAt(),
                 prior.rushMode(), prior.maxGrams(), prior.approvalAboveGrams(), prior.approvalHoldMinutes(), prior.leadMinutes(), 240, prior.pickupGraceMinutes()));
         assertThat(accept(result.quote()).status()).isEqualTo(201);
+    }
+
+    @Test
+    void fs04LocksActualOccupancyAndPersistsChangedTermsBeforeFreshAssent() throws Exception {
+        when(slotPolicies.capture()).thenReturn(slotBundle("rush-live-digest", true, "LIVE", 120, 15));
+        assertThat(shop.setupPolicyFixture().code()).isEqualTo("POLICY_FIXTURE_READY");
+        db.update("DELETE FROM orders WHERE id=-4");
+        db.update("UPDATE batches SET phone_grams_total=3500 WHERE id='G-policy-seats'");
+        db.update("UPDATE pickup_slots SET used=3 WHERE (pickup_at AT TIME ZONE 'Asia/Kolkata')::time=TIME '19:30'");
+        var waiting = quote(1, "barfi", 2500, "19:30");
+        assertThat(waiting.requiresApproval()).isFalse();
+        assertThat(waiting.policy().slot().used()).isEqualTo(3);
+        assertThat(waiting.policy().slot().profile()).isEqualTo("RUSH");
+        var earlier = quote(2, "kaju-katli", 500, "19:30");
+        var earlierChangedSlot = new CountDownLatch(1);
+        var allowCommit = new CountDownLatch(1);
+        try (var threads = Executors.newVirtualThreadPerTaskExecutor()) {
+            var competitor = threads.submit(() -> new TransactionTemplate(transactionManager).execute(transaction -> {
+                var result = accept(earlier);
+                earlierChangedSlot.countDown();
+                try {
+                    if (!allowCommit.await(4, TimeUnit.SECONDS)) throw new AssertionError("Competitor not released");
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(failure);
+                }
+                return result;
+            }));
+            try {
+                assertThat(earlierChangedSlot.await(3, TimeUnit.SECONDS)).isTrue();
+                var assent = threads.submit(() -> accept(waiting));
+                boolean observedDatabaseWait = false;
+                Instant expires = Instant.now().plusSeconds(2);
+                while (Instant.now().isBefore(expires) && !observedDatabaseWait) {
+                    observedDatabaseWait = count("""
+                            SELECT COUNT(*) FROM pg_stat_activity
+                            WHERE datname=current_database() AND pid<>pg_backend_pid()
+                              AND query LIKE 'SELECT used,capacity FROM pickup_slots%FOR UPDATE%'
+                              AND cardinality(pg_blocking_pids(pid))>0
+                            """) > 0;
+                    if (!observedDatabaseWait) Thread.sleep(10);
+                }
+                assertThat(observedDatabaseWait).isTrue();
+                allowCommit.countDown();
+                assertThat(competitor.get(3, TimeUnit.SECONDS).status()).isEqualTo(201);
+                var change = assent.get(3, TimeUnit.SECONDS);
+                assertThat(change.code()).isEqualTo("TERMS_CHANGED");
+                assertThat(change.quote().policy().slot().used()).isEqualTo(4);
+                assertThat(change.quote().policy().slot().profile()).isEqualTo("BUSY_SLOT");
+                assertThat(change.quote().policy().slot().reasonCode()).isEqualTo("SLOT_NEAR_CAPACITY");
+                assertThat(change.quote().policy().slot().why()).contains("80%", "2.5 kg", "2 kg");
+                assertThat(change.quote().policy().slot().whyHindi()).contains("80 प्रतिशत", "2.5 किलो", "2 किलो");
+                assertThat(accept(waiting)).isEqualTo(change);
+                assertThat(used("19:30")).isEqualTo(4);
+                assertThat(amount("G")).isEqualTo(6500);
+                assertThat(shop.orders()).hasSize(1);
+                var held = accept(change.quote()).order();
+                assertThat(held.status()).isEqualTo("AWAITING_APPROVAL");
+                assertThat(held.policy().slot()).isEqualTo(change.quote().policy().slot());
+                assertThat(used("19:30")).isEqualTo(5);
+            } finally {
+                allowCommit.countDown();
+            }
+        }
+    }
+
+    @Test
+    void fs07TwoSavedSlotsShareOneDigestWithDifferentApprovalAndKeepEarlierOrder() throws Exception {
+        when(slotPolicies.capture()).thenReturn(slotBundle("normal-revision", false, "LIVE", 180, 15));
+        var earlier = accept(quote(1, "kaju-katli", 500, "18:30")).order();
+        mvc.perform(post("/ops/demo/policy-fixture").header("X-Staff-Token", "test-role-operator"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.code").value("POLICY_FIXTURE_READY"));
+        assertThat(shop.setupPolicyFixture().code()).isEqualTo("POLICY_FIXTURE_PRESENT");
+        assertThat(count("""
+                SELECT COUNT(*) FROM demo_policy_seats s JOIN orders o ON o.id=s.order_id
+                JOIN quotes q ON q.id=o.accepted_quote_id WHERE o.status='CONFIRMED' AND o.grams=s.grams
+                    AND o.pickup_at=s.pickup_at AND q.batch_id=s.batch_id AND o.batch_id=s.batch_id
+                """)).isEqualTo(8);
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE order_id<0")).isZero();
+        assertThat(amount("G-policy-seats")).isZero();
+        assertThat(amount("G")).isEqualTo(6500);
+        var oldBarfi = quote(2, "barfi", 4000, "20:00");
+        assertThat(oldBarfi.requiresApproval()).isFalse();
+        when(slotPolicies.capture()).thenReturn(slotBundle("same-rush-revision", true, "LIVE", 120, 15));
+        mvc.perform(get("/api/policy").header("X-Staff-Token", "test-role-owner"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.digest").value("same-rush-revision"))
+                .andExpect(jsonPath("$.slot").doesNotExist());
+        var changed = accept(oldBarfi);
+        assertThat(changed.code()).isEqualTo("TERMS_CHANGED");
+        assertThat(changed.quote().policy().slot().reasonCode()).isEqualTo("RUSH_HOUR");
+        assertThat(changed.quote().policy().slot().why()).contains("Rush mode", "3 kg");
+        assertThat(accept(changed.quote()).order().status()).isEqualTo("AWAITING_APPROVAL");
+        var busy = quote(3, "barfi", 2500, "19:30");
+        var lighter = quote(3, "barfi", 2500, "20:00");
+        assertThat(busy.pricePaise()).isEqualTo(225000);
+        assertThat(busy.requiresApproval()).isTrue();
+        assertThat(lighter.requiresApproval()).isFalse();
+        assertThat(busy.policy().slot().digest()).isEqualTo(lighter.policy().slot().digest());
+        assertThat(busy.policy().slot().used()).isEqualTo(4);
+        assertThat(busy.policy().slot().capacity()).isEqualTo(5);
+        assertThat(lighter.policy().slot().used()).isEqualTo(5);
+        assertThat(lighter.policy().slot().capacity()).isEqualTo(10);
+        assertThat(busy.policy().slot().terms().approvalRequired()).isTrue();
+        assertThat(lighter.policy().slot().terms().approvalRequired()).isFalse();
+        assertThat(store.write(busy.policy())).doesNotContain("customerName", "phone", "sessionId", "transcript");
+        int quoteCount = count("SELECT COUNT(*) FROM quotes");
+        mvc.perform(get("/api/policy/pickup-options").param("sku", "barfi").param("grams", "2500")
+                        .header("X-Staff-Token", "test-role-owner"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.options[0].requiresApproval").value(true))
+                .andExpect(jsonPath("$.options[1].requiresApproval").value(false));
+        mvc.perform(get("/api/policy/saved-comparisons").header("X-Staff-Token", "test-role-staff")).andExpect(status().isForbidden());
+        mvc.perform(get("/api/policy/saved-comparisons").header("X-Staff-Token", "test-role-owner"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$[0].options[0].policy.slot.why").value(busy.policy().slot().why()))
+                .andExpect(jsonPath("$[0].options[1].policy.slot.why").value(lighter.policy().slot().why()));
+        assertThat(count("SELECT COUNT(*) FROM quotes")).isEqualTo(quoteCount);
+        var finalOrder = accept(lighter).order();
+        assertThat(finalOrder.status()).isEqualTo("CONFIRMED");
+        assertThat(finalOrder.approvalExpiresAt()).isNull();
+        assertThat(used("19:30")).isEqualTo(4);
+        assertThat(used("20:00")).isEqualTo(6);
+        assertThat(amount("G")).isZero();
+        assertThat(shop.orders().getFirst()).isEqualTo(earlier);
+    }
+
+    @Test
+    void fs04MaterialTermsIgnoreDigestAndTtlAndHoldCannotOutlastPickupCutoff() {
+        when(slotPolicies.capture()).thenReturn(slotBundle("old", true, "LIVE", 120, 15));
+        var previous = quote(1, "barfi", 2500, "20:00");
+        when(slotPolicies.capture()).thenReturn(slotBundle("metadata-only", true, "LIVE", 120, 15));
+        var booked = accept(previous).order();
+        assertThat(booked.status()).isEqualTo("CONFIRMED");
+        assertThat(booked.policy().slot().digest()).isEqualTo("metadata-only");
+        var oldTtl = quote(2, "barfi", 2500, "20:00");
+        when(slotPolicies.capture()).thenReturn(slotBundle("new-ttl", true, "LIVE", 360, 15));
+        assertThat(accept(oldTtl).order().status()).isEqualTo("CONFIRMED");
+        shop.reset(null);
+        when(slotPolicies.capture()).thenReturn(slotBundle("cached-long-hold", true, "CACHED", 120, 60));
+        var full = makeQuote(3, "barfi", 6000, "18:15");
+        assertThat(full.code()).isEqualTo("TOO_LARGE");
+        var held = accept(quote(3, "barfi", 4000, "18:15")).order();
+        assertThat(held.approvalExpiresAt()).isEqualTo(held.pickupAt().minusSeconds(15 * 60));
+        assertThat(held.policy().slot().why()).contains("last accepted", "was on");
+    }
+
+    @Test
+    void fsF08BoundaryProfilesUseGramCapsAndBackedSlotAvailability() {
+        when(slotPolicies.capture()).thenReturn(slotBundle("standard", false, "LIVE", 180, 15));
+        assertThat(shop.setupPolicyFixture().status()).isEqualTo(200);
+        assertApprovalBoundaries(List.of(3000, 4000), List.of(5000));
+        when(slotPolicies.capture()).thenReturn(slotBundle("rush", true, "LIVE", 120, 15));
+        assertApprovalBoundaries(List.of(2500, 3000), List.of(4000, 5000));
+        db.update("UPDATE pickup_slots SET capacity=5 WHERE (pickup_at AT TIME ZONE 'Asia/Kolkata')::time=TIME '20:00'");
+        assertApprovalBoundaries(List.of(2000), List.of(2500, 3000));
+        when(slotPolicies.capture()).thenReturn(slotBundle("local-fallback", false, "FALLBACK", 120, 10));
+        assertApprovalBoundaries(List.of(2000), List.of(2500));
+        var fallback = quote(4, "barfi", 2500, "20:00");
+        assertThat(fallback.policy().source()).isEqualTo("FALLBACK");
+        assertThat(fallback.policy().slot().reasonCode()).isEqualTo("FALLBACK_POLICY");
+        assertThat(fallback.policy().slot().why()).contains("Backup pickup rules");
+        assertThat(fallback.policy().approvalHoldMinutes()).isEqualTo(10);
+
+        var hold = accept(fallback).order();
+        assertThat(hold.status()).isEqualTo("AWAITING_APPROVAL");
+        assertThat(shop.action(hold.id(), "approve", null).order().status()).isEqualTo("CONFIRMED");
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE kind='APPROVED'")).isEqualTo(1);
+        var later = accept(quote(5, "barfi", 2500, "19:30")).order();
+        assertThat(shop.action(later.id(), "reject", null).order().status()).isEqualTo("REJECTED");
+        assertThat(shop.action(later.id(), "reject", null).status()).isEqualTo(409);
+        assertThat(used("19:30")).isEqualTo(4);
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE kind='REJECTED'")).isEqualTo(1);
+    }
+
+    private void assertApprovalBoundaries(List<Integer> confirmable, List<Integer> approvalNeeded) {
+        for (int quantity : confirmable) assertThat(quote(1, "barfi", quantity, "20:00").requiresApproval()).isFalse();
+        for (int quantity : approvalNeeded) assertThat(quote(1, "barfi", quantity, "20:00").requiresApproval()).isTrue();
+        assertThat(makeQuote(1, "barfi", 6000, "20:00").code()).isEqualTo("TOO_LARGE");
+    }
+
+    private SlotPolicyProvider.Snapshot slotBundle(String digest, boolean rush, String source, int ttl, int hold) {
+        return (grams, used, capacity) -> {
+            boolean busy = 100L * used / capacity >= 80;
+            boolean backup = "FALLBACK".equals(source);
+            String profile = backup ? "FALLBACK" : busy ? "BUSY_SLOT" : rush ? "RUSH" : "NORMAL";
+            String reason = backup ? "FALLBACK_POLICY" : busy ? "SLOT_NEAR_CAPACITY" : rush ? "RUSH_HOUR" : "STANDARD";
+            int threshold = backup || busy ? 2000 : rush ? 3000 : 4000;
+            return new Policy(digest, source, Instant.EPOCH, Instant.EPOCH, rush, 5000, threshold, busy || backup ? 10 : hold,
+                    rush || busy || backup ? 30 : 15, ttl, rush || busy || backup ? 20 : 30)
+                    .withSlot(SlotPolicyProvider.audit(digest, profile, reason, grams, threshold, used, capacity));
+        };
     }
 
     @Test
@@ -544,9 +740,18 @@ class BookingPostgresTest {
         var first = accept(quote(1, "kaju-katli", 500, "18:30")).order();
         var other = accept(quote(2, "kaju-katli", 500, "19:30")).order();
         assertThat(shop.action(first.id(), "short", 300).order().status()).isEqualTo("SHORT");
+        assertThat(count("SELECT COUNT(*) FROM batches WHERE id='A' AND blocked")).isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE order_id=4821 AND kind='SHORT'")).isEqualTo(1);
+        assertThat(shop.action(first.id(), "pack", null).status()).isEqualTo(409);
         assertThat(shop.action(other.id(), "pack", null).reason()).isEqualTo("BATCH_BLOCKED");
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE kind='READY'")).isZero();
         assertThat(shop.action(first.id(), "cancel", null).status()).isEqualTo(200);
         assertThat(shop.action(first.id(), "pack", null).status()).isEqualTo(409);
+        assertThat(shop.action(first.id(), "cancel", null).status()).isEqualTo(409);
+        assertThat(used("18:30")).isZero();
+        assertThat(used("19:30")).isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) FROM orders WHERE released_at IS NOT NULL")).isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE order_id=4821 AND kind='CANCELLED'")).isEqualTo(1);
         assertThat(amount("A")).isEqualTo(500);
         assertThat(shop.batchAction("A", "unblock", null).status()).isEqualTo(400);
         assertThat(shop.batchAction("A", "unblock", 300).code()).isEqualTo("COUNT_BELOW_HOLDS");
@@ -633,6 +838,12 @@ class BookingPostgresTest {
         mvc.perform(post("/api/demo/reset").header("X-Staff-Token", "test-role-owner")).andExpect(status().isForbidden());
         mvc.perform(get("/api/orders").header("X-Booking-Token", "test-role-booking")).andExpect(status().isUnauthorized());
         mvc.perform(post("/api/orders/4821/pack").header("X-Staff-Token", "test-role-operator")).andExpect(status().isForbidden());
+        String resend = "/api/messages/" + UUID.randomUUID() + "/resend";
+        mvc.perform(post(resend)).andExpect(status().isUnauthorized());
+        mvc.perform(post(resend).header("X-Staff-Token", "test-role-staff")).andExpect(status().isForbidden());
+        mvc.perform(post(resend).header("X-Staff-Token", "test-role-operator")).andExpect(status().isForbidden());
+        mvc.perform(post(resend).header("X-Staff-Token", "test-role-owner"))
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("NOTICE_UNAVAILABLE"));
         mvc.perform(get("/api/staff/session").header("X-Staff-Token", "test-role-owner"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.role").value("OWNER"));
         mvc.perform(post("/ops/demo/reset").header("X-Staff-Token", "test-role-operator")).andExpect(status().isOk());

@@ -14,8 +14,12 @@ const heading = $("caller-heading");
 const speakLabel = $("speak-label");
 const actionHint = $("action-hint");
 const amount = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2, minimumFractionDigits: 0 });
+const policyProfiles = { NORMAL: "Normal", RUSH: "Rush", BUSY_SLOT: "Busy slot", FALLBACK: "Safe default" };
 let session, sequence, quote, playedQuote, speakingQuote, recorder, pending, audioUrl, sealed, working;
 let microphoneTrack;
+const requestedShop = new URLSearchParams(location.search).get("shop");
+let activeShop;
+let shopAvailable = requestedShop === null;
 let timer, receiptTimer;
 let checkingReceipt = false;
 let receiptChecks = 0;
@@ -43,7 +47,7 @@ function beginSession() {
   retry.hidden = true;
   retry.textContent = "Retry this turn";
   speak.hidden = false;
-  speak.disabled = false;
+  speak.disabled = !shopAvailable;
   speakLabel.textContent = "Start speaking";
   clearAudio();
   showError("");
@@ -98,6 +102,21 @@ function loadAudio(encoded, promptQuote = null) {
   void playReply();
 }
 
+function renderPolicy(facts, quoted) {
+  const policy = facts?.decision;
+  $("quote-policy").hidden = !policy;
+  if (!policy) return;
+  const profile = policyProfiles[policy.profile] || "Shop policy";
+  const source = { LIVE: "Live", CACHED: "Cached", FALLBACK: "Safe default" }[policy.source] || policy.source;
+  const term = quoted ? (facts.requiresApproval ? "Approval needed" : "Confirmable") : "Saved policy";
+  $("quote-policy-status").textContent = [profile, term].join(" · ");
+  const fetched = policy.fetchedAt && new Date(policy.fetchedAt).toLocaleTimeString("en-IN", {
+    hour: "numeric", minute: "2-digit", second: "2-digit", timeZone: "Asia/Kolkata"
+  });
+  $("quote-policy-version").textContent = [source, policy.digest?.slice(0, 12), fetched && `Fetched ${fetched} IST`]
+    .filter(Boolean).join(" · ");
+}
+
 function render(result) {
   const turn = result.turn;
   const facts = turn.order || turn.quote;
@@ -115,7 +134,8 @@ function render(result) {
   $("transcript-section").hidden = !turn.transcript;
   $("transcript").textContent = turn.transcript || "";
   $("details").hidden = !facts;
-  $("approval-note").hidden = !turn.quote?.requiresApproval;
+  $("approval-note").hidden = !turn.quote?.requiresApproval || Boolean(facts?.decision);
+  renderPolicy(facts, Boolean(turn.quote));
   $("order-number").hidden = !turn.order;
   if (facts) {
     const kaju = facts.itemName.toLowerCase() === "kaju katli";
@@ -123,7 +143,9 @@ function render(result) {
     $("sweet-art").hidden = !kaju;
     $("card-title").textContent = turn.order ? "Your pickup" : "Your quote";
     $("item").textContent = facts.itemName;
-    $("grams").textContent = facts.grams >= 1000 ? facts.grams / 1000 + " kg" : facts.grams + " g";
+    const quantity = facts.quantity ?? facts.grams;
+    $("grams").textContent = facts.unit === "PIECE" ? `${quantity} ${quantity === 1 ? "piece" : "pieces"}`
+      : quantity >= 1000 ? `${quantity / 1000} kg` : `${quantity} g`;
     $("pickup").textContent = formatTime(facts.pickupTime);
     $("amount").textContent = amount.format(facts.pricePaise / 100);
     if (turn.order) $("order-number").textContent = `Order #${turn.order.id}`;
@@ -162,6 +184,7 @@ async function sendTurn() {
     const response = await fetch("/api/voice/browser/turn", {
       method: "POST",
       body: data,
+      headers: activeShop ? { "X-Rush-Shop": activeShop } : undefined,
       signal: AbortSignal.timeout(22000)
     });
     if (!response.ok) {
@@ -278,7 +301,7 @@ async function recordTurn() {
 
 form.addEventListener("submit", event => {
   event.preventDefault();
-  if (sealed || working || pending) return;
+  if (!shopAvailable || sealed || working || pending) return;
   if (recorder?.state === "recording") {
     speak.disabled = true;
     recorder.stop();
@@ -299,3 +322,28 @@ window.addEventListener("pagehide", () => {
   clearTimeout(receiptTimer);
 });
 beginSession();
+if (requestedShop !== null) void identifyShop();
+
+async function identifyShop() {
+  try {
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(requestedShop) || requestedShop.length > 48) throw new Error();
+    const response = await fetch(`/api/storefront/${encodeURIComponent(requestedShop)}`, {
+      headers: { Accept: "application/json" }, cache: "no-store", signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) throw new Error();
+    const { shop } = await response.json();
+    if (shop?.slug !== requestedShop || typeof shop.displayName !== "string" || !shop.displayName.trim()) throw new Error();
+    activeShop = shop.slug;
+    shopAvailable = true;
+    $("caller-shop").textContent = shop.displayName;
+    $("caller-shop").hidden = false;
+    document.title = `Speak your order · ${shop.displayName}`;
+    speak.disabled = false;
+  } catch {
+    heading.textContent = "Shop unavailable";
+    $("intro").hidden = true;
+    form.hidden = true;
+    speak.hidden = true;
+    showError("This shop couldn’t be opened. Check the checkout link or try reloading.");
+  }
+}

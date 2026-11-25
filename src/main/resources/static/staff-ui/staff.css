@@ -41,6 +41,27 @@
 .activity li:first-child::before, .activity li::before { content: ""; width: .55rem; height: .55rem; position: absolute; left: .05rem; top: .92rem; background: #72bd35; border-radius: 50%; }
 .activity li[data-state="pending"]::before { background: #c5892e; }
 .needs-approval, .recent { margin-top: .78rem; }
+.stock-exceptions { margin-top: .85rem; padding-top: .75rem; border-top: 1px solid var(--line); }
+.stock-exceptions h3 { margin: 0 0 .45rem; font-size: 1rem; }
+.stock-issue { padding: .72rem .83rem; background: #fff4e3; border-radius: .65rem; }
+.stock-issue + .stock-issue { margin-top: .55rem; }
+.stock-issue > h4 { margin: 0 0 .28rem; }
+.stock-issue > .button { margin-top: .45rem; }
+.desk-success { margin: 0 0 .8rem; padding: .65rem .82rem; background: #e5f3e0; color: #183923; border-radius: .56rem; }
+.policy-why { margin-top: .42rem; color: var(--muted); font-size: .87rem; line-height: 1.42; }
+.policy-audit { margin-top: .35rem; color: var(--muted); font-size: .82rem; overflow-wrap: anywhere; }
+.policy-audit summary { color: var(--dark); width: fit-content; cursor: pointer; }
+.policy-audit dl { margin: .35rem 0 0; }
+.policy-audit dt { font-weight: 670; }
+.policy-audit dd { margin: 0 0 .25rem; }
+.policy-comparisons { margin: .75rem 0 0; border-top: 1px solid var(--line); padding-top: .75rem; }
+.policy-comparisons h3 { font-size: 1rem; line-height: 1.35; }
+.policy-compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: .5rem; margin-top: .53rem; }
+.policy-option { border: 1px solid var(--line); border-radius: .6rem; padding: .6rem; overflow-wrap: anywhere; }
+.policy-option h4 { font-size: .95rem; margin: 0 0 .22rem; }
+.policy-option > p { margin-bottom: .23rem; }
+.policy-compare-note { margin-top: .45rem; font-size: .81rem; }
+@media(max-width: 475px) { .policy-compare-grid { grid-template-columns: 1fr; } }
 .pending-count { color: var(--warning); padding: .32rem .5rem; background: #fdf2df; border-radius: 999px; font-size: .8rem; font-weight: 650; }
 .status { background: #e5f3e0; color: var(--dark); padding: .25rem .42rem; border-radius: 99px; font-size: .77rem; font-weight: 650; }
 .status[data-state="AWAITING_APPROVAL"], .status[data-state="SHORT"] { background: #fdf2df; color: var(--warning); }

@@ -137,6 +137,84 @@ class OutboxPostgresTest {
         assertNull(outbox.claim(false,""));
     }
 
+    @Test
+    void o02ReplayTwiceOnlyRequeuesAnEligibleNoticeAndRechecksProviderEvidence() {
+        order(1,"CONFIRMED");
+        UUID retry = message(1,"CONFIRMED");
+        observe(begin(), new DeliveryResult("FAILED_RETRYABLE", null, "RATE_LIMITED"));
+        database.sql("UPDATE outbox_messages SET next_attempt_at=now()+interval '15 minutes' WHERE id=:id")
+            .param("id", retry).update();
+        order(2,"CONFIRMED");
+        UUID review = message(2,"CONFIRMED");
+        var firstReview = begin();
+        observe(firstReview, DeliveryResult.unknown("TWILIO_HTTP_503"));
+        ageUnknown();
+        order(3,"CONFIRMED");
+        UUID permanent = message(3,"CONFIRMED");
+        observe(begin(), new DeliveryResult("FAILED", null, "TWILIO_HTTP_400"));
+        order(4,"CONFIRMED");
+        UUID withEvidence = message(4,"CONFIRMED");
+        var confirmed = begin();
+        observe(confirmed, new DeliveryResult("SUBMITTED", SID, null));
+        database.sql("UPDATE outbox_messages SET status='NEEDS_REVIEW' WHERE id=:id").param("id", withEvidence).update();
+        order(5,"CONFIRMED");
+        UUID granted = message(5,"CONFIRMED");
+        database.sql("INSERT INTO notification_live_grant(run_id,order_id,approval_ref) VALUES (:run,5,'isolated-fixture')")
+            .param("run", run).update();
+        database.sql("UPDATE outbox_messages SET status='NEEDS_REVIEW' WHERE id=:id").param("id", granted).update();
+
+        assertEquals("REVIEW_REQUIRED", replay(review, true, false).code());
+        assertEquals(202, replay(retry, false, true).status());
+        assertEquals(202, replay(review, true, true).status());
+        assertEquals(409, replay(retry, false, true).status());
+        assertEquals(409, replay(review, true, true).status());
+        assertEquals(409, replay(permanent, false, true).status());
+        assertEquals("PROVIDER_EVIDENCE_FOUND", replay(withEvidence, true, true).code());
+        assertEquals(409, replay(withEvidence, true, true).status());
+        assertEquals(404, replay(granted, true, true).status());
+        assertEquals("QUEUED", state(retry));
+        assertEquals("QUEUED", state(review));
+        assertEquals("FAILED", state(permanent));
+        assertEquals("SUBMITTED", state(withEvidence));
+        assertEquals("NEEDS_REVIEW", state(granted));
+        assertEquals(4, attempts());
+    }
+
+    @Test
+    void c09OlderCallbackSuppressesOnlyTheNewAttemptBeforeDispatch() {
+        for (int number = 1; number <= 2; number++) {
+            order(number,"CONFIRMED");
+            UUID id = message(number,"CONFIRMED");
+            var initial = begin();
+            observe(initial, DeliveryResult.unknown("TWILIO_RESPONSE_UNCERTAIN"));
+            ageUnknown();
+            assertEquals("NEEDS_REVIEW", state(id));
+            assertEquals(202, replay(id, true, true).status());
+            var retry = begin();
+            assertEquals(id, retry.messageId());
+            assertNotEquals(initial.attemptId(), retry.attemptId());
+            String latest = number == 1 ? "SUBMITTED" : "DELIVERED";
+            var sid = "SM" + "0".repeat(31) + number;
+            observe(initial, new DeliveryResult(latest, sid, null));
+            assertFalse(outbox.stillCurrent(retry, false));
+            observe(retry, new DeliveryResult("SUPPRESSED", null, "ORDER_STATE_CHANGED"));
+            assertEquals(latest, state(id));
+            assertEquals("SUPPRESSED", database.sql("SELECT status FROM notification_attempts WHERE id=:id")
+                .param("id", retry.attemptId()).query(String.class).single());
+            assertEquals(409, replay(id, true, true).status());
+        }
+        assertEquals(4, attempts());
+    }
+
+    private OutboxRepository.Replay replay(UUID id, boolean resend, boolean reviewed) {
+        return transaction.execute(s -> outbox.requestReplay(id, resend, reviewed));
+    }
+
+    private void ageUnknown() {
+        database.sql("UPDATE outbox_messages SET updated_at=now()-interval '3 minutes' WHERE status='UNKNOWN'").update();
+        recover();
+    }
+
     private OutboxRepository.Dispatch begin() {
         var claim = outbox.claim(false,"");
         return transaction.execute(s -> outbox.begin(claim,false,""));

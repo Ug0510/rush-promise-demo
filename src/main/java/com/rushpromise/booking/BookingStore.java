@@ -61,7 +61,7 @@ class BookingStore {
         Quote quote = new Quote(row.getObject("id", UUID.class), row.getString("session_id"), row.getString("sku"),
                 row.getString("item_name"), row.getInt("grams"), row.getInt("price_paise"), shopTime(pickup), pickup,
                 row.getString("batch_id"), row.getBoolean("requires_approval"), at(row, "expires_at"),
-                read(row.getString("policy"), Policy.class));
+                read(row.getString("policy"), Policy.class), row.getString("sale_unit"));
         return new QuoteRow(quote, row.getObject("run_id", UUID.class), row.getString("customer_name"), row.getString("phone"));
     }
 
@@ -72,7 +72,7 @@ class BookingStore {
                 row.getString("sku"), row.getString("item_name"), row.getInt("grams"), row.getInt("price_paise"),
                 shopTime(pickup), pickup, row.getString("batch_id"), row.getString("status"), at(row, "approval_expires_at"),
                 read(row.getString("policy"), Policy.class), at(row, "created_at"), at(row, "packed_at"),
-                at(row, "released_at"), row.getBoolean("return_to_tray"), row.getBoolean("check_stock"));
+                at(row, "released_at"), row.getBoolean("return_to_tray"), row.getBoolean("check_stock"), row.getString("sale_unit"));
     }
 
     ShopProfile profile() {
@@ -94,7 +94,8 @@ class BookingStore {
     }
 
     void message(Order order, String kind) {
-        String orderLabel = profile().displayName() + " #" + order.id() + " (" + order.grams() + " g " + order.itemName() + ")";
+        String measure = "PIECE".equals(order.unit()) ? (order.grams() == 1 ? " piece " : " pieces ") : " g ";
+        String orderLabel = profile().displayName() + " #" + order.id() + " (" + order.grams() + measure + order.itemName() + ")";
         String pickup = order.pickupAt().atZone(SHOP_ZONE).format(java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.ENGLISH));
         String body = switch (kind) {
             case "CONFIRMED", "APPROVED" -> orderLabel + " is confirmed for " + pickup + " pickup. Pay at the counter.";

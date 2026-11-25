@@ -11,6 +11,7 @@
 <body>
   <main class="caller" data-stage="collecting">
     <header class="brand"><span class="brand-mark" aria-hidden="true"></span>Rush Promise</header>
+    <p id="caller-shop" class="action-hint" hidden></p>
     <section class="caller-title">
       <h1 id="caller-heading">Speak your order</h1>
       <p id="intro">Say what you’d like, how much, and when you’ll pick it up.</p>
@@ -37,6 +38,10 @@
           <div class="pickup-price"><dt>Pay at pickup</dt><dd id="amount"></dd></div>
         </dl>
         <p id="approval-note" class="approval-note" hidden>Shop approval is required for this request.</p>
+        <div id="quote-policy" class="quote-policy" hidden>
+          <p id="quote-policy-status"></p>
+          <p id="quote-policy-version"></p>
+        </div>
         <p id="order-number" class="order-number" hidden></p>
       </article>
 

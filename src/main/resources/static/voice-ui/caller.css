@@ -64,6 +64,9 @@ input:disabled { color: var(--muted); }
 .quote-details .pickup-price { border-top: 1px solid var(--line); }
 .approval-note, .order-number { font-size: .87rem; line-height: 1.4; border-top: 1px solid var(--line); padding: .65rem .15rem 0; font-weight: 650; }
 .approval-note { color: var(--warning); }
+.quote-policy { border-top: 1px solid var(--line); padding: .65rem .15rem 0; font-size: .83rem; }
+#quote-policy-status { font-weight: 720; }
+#quote-policy-version { margin-top: .25rem; color: var(--muted); overflow-wrap: anywhere; }
 .order-number { color: var(--dark); }
 .heard-card #transcript { display: block; margin: .45rem 0 .8rem; font-size: clamp(1rem, 4.2vw, 1.18rem); font-weight: 660; line-height: 1.45; overflow-wrap: anywhere; }
 .playback { display: flex; gap: .8rem; align-items: center; }

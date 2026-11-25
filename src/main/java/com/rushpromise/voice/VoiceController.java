@@ -1,6 +1,8 @@
 package com.rushpromise.voice;
 
 import com.fasterxml.jackson.databind.JsonMappingException;
+import com.rushpromise.platform.SarvamShopRouting;
+import com.rushpromise.platform.TenantContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -23,6 +25,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Semaphore;
@@ -32,22 +35,25 @@ import java.util.concurrent.Semaphore;
 class VoiceController {
     private static final Logger log = LoggerFactory.getLogger(VoiceController.class);
     private static final Set<String> TOOL_FIELDS = Set.of(
-            "event", "interactionId", "phone", "turnId", "sequence", "confirmationQuoteId", "customerName", "utterance", "language");
+            "event", "interactionId", "phone", "turnId", "sequence", "confirmationQuoteId", "customerName", "utterance", "language", "shopSlug", "routed");
     private final SarvamSpeech speech;
     private final VoiceSessionService sessions;
     private final VoicePrompts prompts;
     private final VoiceConversation conversation;
+    private final SarvamShopRouting routing;
     private final String sarvamBearer;
     private final String demoHandset;
     private final Semaphore browserSpeech = new Semaphore(6, true);
 
     VoiceController(SarvamSpeech speech, VoiceSessionService sessions, VoicePrompts prompts, VoiceConversation conversation,
+                    SarvamShopRouting routing,
                     @Value("${RUSH_SARVAM_TOOL_TOKEN:}") String sarvamBearer,
                     @Value("${RUSH_DEMO_HANDSET:}") String demoHandset) {
         this.speech = speech;
         this.sessions = sessions;
         this.prompts = prompts;
         this.conversation = conversation;
+        this.routing = routing;
         this.sarvamBearer = sarvamBearer;
         this.demoHandset = demoHandset;
     }
@@ -62,7 +68,7 @@ class VoiceController {
                                              @RequestParam(defaultValue = "false") boolean receiptOnly,
                                              @RequestPart(value = "audio", required = false) MultipartFile audio) {
         var turn = turn("browser:" + sessionId, turnId.toString(), sequence, confirmationQuoteId, customerName, phone);
-        if (!demoHandset.isBlank() && !demoHandset.equals(turn.phone())) {
+        if (TenantContext.legacy() && !demoHandset.isBlank() && !demoHandset.equals(turn.phone())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This demo uses the enrolled handset");
         }
         if (!receiptOnly && audio == null) {
@@ -96,12 +102,20 @@ class VoiceController {
     @PostMapping(path = "/api/voice/sarvam/turn", consumes = MediaType.APPLICATION_JSON_VALUE)
     ResponseEntity<?> sarvamTurn(@RequestHeader(value = "Authorization", required = false) String auth,
                                                          @RequestBody SarvamTurn request) {
-        if (sarvamBearer.isBlank() || !matchesBearer(auth)) {
+        boolean workspaceAuth = !sarvamBearer.isBlank() && matchesBearer(auth);
+        if (!TenantContext.nativeAuthorized() && !workspaceAuth) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED);
         }
         String language = "en-IN".equalsIgnoreCase(request.language()) ? "en-IN" : "hi-IN";
-        if ("start".equals(request.event())) return privateResponse(conversation.greet(language));
-        if ("menu".equals(request.event())) return privateResponse(conversation.menu(language));
+        if ("directory".equals(request.event())) {
+            if (!workspaceAuth) throw new ResponseStatusException(HttpStatus.FORBIDDEN);
+            return privateResponse(selection("SHOP_SELECTION_REQUIRED", language));
+        }
+        boolean selecting = "select-shop".equals(request.event());
+        boolean readOnly = "start".equals(request.event()) || "menu".equals(request.event());
+        if (readOnly && !request.routed() && (request.interactionId() == null || request.interactionId().isBlank())) {
+            return nativeConversation(request, language, null);
+        }
         String sessionId;
         try {
             sessionId = nativeSessionId(request.interactionId());
@@ -109,6 +123,42 @@ class VoiceController {
             logNativeRejection("interaction", request);
             throw invalid;
         }
+        if (selecting) {
+            if (!workspaceAuth) throw new ResponseStatusException(HttpStatus.FORBIDDEN);
+            var chosen = routing.choose(sessionId, request.shopSlug());
+            if (chosen == null) return privateResponse(selection("SHOP_SELECTION_REQUIRED", language));
+            try (var ignored = TenantContext.enter(chosen.schema())) {
+                var greeting = conversation.greet(language);
+                String state = chosen.slug().equals(request.shopSlug()) ? "SHOP_SELECTED" : "SHOP_ALREADY_SELECTED";
+                return privateResponse(new ShopChoiceReply(state, language, greeting.replyText(), greeting.shopName(), null));
+            }
+        }
+        var pin = routing.route(sessionId);
+        if (pin != null) {
+            if (TenantContext.nativeAuthorized() && !pin.schema().equals(TenantContext.schema())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN);
+            }
+            try (var ignored = TenantContext.enter(pin.schema())) {
+                return nativeConversation(request, language, sessionId);
+            }
+        }
+        if (request.routed()) return privateResponse(selection("SHOP_SELECTION_REQUIRED", language));
+        return nativeConversation(request, language, sessionId);
+    }
+
+    private ShopChoiceReply selection(String state, String language) {
+        List<SarvamShopRouting.Choice> shops = routing.choices();
+        String names = String.join(" / ", shops.stream().map(SarvamShopRouting.Choice::displayName).toList());
+        boolean hindi = "hi-IN".equals(language);
+        String reply = shops.isEmpty() ? (hindi ? "अभी दुकानें उपलब्ध नहीं हैं।" : "The shops aren't available right now.")
+                : hindi ? "नमस्ते, यह Rush Promise है। आप किस दुकान से ऑर्डर करना चाहेंगे? " + names + "।"
+                : "Hello, this is Rush Promise. Which shop would you like to order from? " + names + ".";
+        return new ShopChoiceReply(state, language, reply, null, shops);
+    }
+
+    private ResponseEntity<?> nativeConversation(SarvamTurn request, String language, String sessionId) {
+        if ("start".equals(request.event())) return privateResponse(conversation.greet(language));
+        if ("menu".equals(request.event())) return privateResponse(conversation.menu(language));
         if ("end".equals(request.event())) {
             try {
                 return privateResponse(sessions.end(sessionId));
@@ -279,5 +329,13 @@ class VoiceController {
 
     record BrowserReply(VoiceSessionService.Reply turn, String audioWavBase64, boolean audioFallback) {}
     record SarvamTurn(String event, String interactionId, String turnId, Integer sequence, UUID confirmationQuoteId,
-                      String customerName, String phone, String utterance, String language) {}
+                      String customerName, String phone, String utterance, String language, String shopSlug, boolean routed) {
+        SarvamTurn(String event, String interactionId, String turnId, Integer sequence, UUID confirmationQuoteId,
+                   String customerName, String phone, String utterance, String language) {
+            this(event, interactionId, turnId, sequence, confirmationQuoteId, customerName, phone, utterance, language, null, false);
+        }
+    }
+
+    record ShopChoiceReply(String state, String language, String replyText, String shopName,
+                           List<SarvamShopRouting.Choice> shops) {}
 }
