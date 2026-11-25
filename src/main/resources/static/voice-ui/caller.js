@@ -9,15 +9,21 @@ const retry = $("retry");
 const player = $("readback");
 const wave = document.querySelector(".voice-wave");
 const amount = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2, minimumFractionDigits: 0 });
-let session, sequence, quote, recorder, pending, audioUrl, sealed, working;
+let session, sequence, quote, playedQuote, speakingQuote, recorder, pending, audioUrl, sealed, working;
 let microphoneTrack;
-let timer;
+let timer, receiptTimer;
+let checkingReceipt = false;
+let receiptChecks = 0;
 
 function beginSession() {
   session = globalThis.crypto?.randomUUID?.();
   sequence = 0;
   quote = null;
+  playedQuote = null;
   pending = null;
+  checkingReceipt = false;
+  receiptChecks = 0;
+  clearTimeout(receiptTimer);
   sealed = false;
   working = false;
   form.hidden = false;
@@ -26,6 +32,7 @@ function beginSession() {
   $("details").hidden = true;
   $("reply").hidden = true;
   retry.hidden = true;
+  retry.textContent = "Retry this turn";
   speak.hidden = false;
   speak.disabled = false;
   speak.textContent = "Start speaking";
@@ -48,6 +55,7 @@ function clearAudio() {
   player.pause();
   if (audioUrl) URL.revokeObjectURL(audioUrl);
   audioUrl = null;
+  speakingQuote = null;
   player.removeAttribute("src");
   replay.hidden = true;
 }
@@ -67,10 +75,21 @@ function formatTime(value) {
   return `${hour % 12 || 12}:${String(minute).padStart(2, "0")} ${hour >= 12 ? "PM" : "AM"}`;
 }
 
+function loadAudio(encoded, promptQuote = null) {
+  clearAudio();
+  const wav = Uint8Array.from(atob(encoded), character => character.charCodeAt(0));
+  audioUrl = URL.createObjectURL(new Blob([wav], { type: "audio/wav" }));
+  speakingQuote = promptQuote;
+  player.src = audioUrl;
+  replay.hidden = false;
+  void playReply();
+}
+
 function render(result) {
   const turn = result.turn;
   const facts = turn.order || turn.quote;
   quote = turn.quote?.id || null;
+  playedQuote = null;
   sealed = Boolean(turn.order) || turn.state === "ENDED";
   $("heard").hidden = !turn.transcript;
   $("transcript").textContent = turn.transcript || "";
@@ -86,32 +105,37 @@ function render(result) {
   reply.textContent = turn.replyText || "";
   restart.hidden = !sealed;
   speak.hidden = sealed;
-  speak.textContent = quote ? "Confirm by voice" : "Speak again";
+  speak.textContent = quote && !result.audioWavBase64 ? "Say ‘repeat’ or change your order"
+    : quote ? "Confirm by voice" : "Speak again";
   showPhase("idle", quote ? "Read-back ready" : "Microphone off");
   clearAudio();
-  if (result.audioWavBase64) {
-    const wav = Uint8Array.from(atob(result.audioWavBase64), character => character.charCodeAt(0));
-    audioUrl = URL.createObjectURL(new Blob([wav], { type: "audio/wav" }));
-    player.src = audioUrl;
-    replay.hidden = false;
-    void playReply();
-  }
+  if (result.audioWavBase64) loadAudio(result.audioWavBase64, result.audioFallback ? null : quote);
 }
 
 async function sendTurn() {
   if (!pending || working) return;
+  const receiptOnly = checkingReceipt;
+  const data = new FormData();
+  for (const [key, value] of pending.entries()) {
+    if (!receiptOnly || key !== "audio") data.set(key, value);
+  }
+  if (receiptOnly) data.set("receiptOnly", "true");
   working = true;
   speak.disabled = true;
   retry.hidden = true;
   showError("");
-  showPhase("processing", "Transcribing your order…");
+  if (!receiptOnly) showPhase("processing", "Transcribing your order…");
   try {
     const response = await fetch("/api/voice/browser/turn", {
       method: "POST",
-      body: pending,
+      body: data,
       signal: AbortSignal.timeout(22000)
     });
     if (!response.ok) {
+      if (response.status === 429) {
+        const busy = await response.json().catch(() => null);
+        if (busy?.audioWavBase64) loadAudio(busy.audioWavBase64);
+      }
       const known = {
         400: "That recording couldn’t be read. Try speaking again.",
         403: "Use the mobile number enrolled for this demo.",
@@ -119,15 +143,21 @@ async function sendTurn() {
         429: "Voice is busy. Try this turn again in a moment.",
         503: "Speech is temporarily unavailable. You can retry this turn."
       };
-      if (response.status < 429) {
+      if (response.status < 429 && !receiptOnly) {
         pending = null;
         if (sequence === 1) form.hidden = false;
       }
       throw new Error(known[response.status] || "Voice service could not respond. Retry this turn.");
     }
     const result = await response.json();
-    pending = null;
-    render(result);
+    checkingReceipt = result.turn.state === "CHECKING_BOOKING";
+    if (!checkingReceipt) {
+      pending = null;
+      render(result);
+    } else if (!receiptOnly) {
+      render(result);
+      receiptChecks = 0;
+    }
   } catch (error) {
     showError(error instanceof TypeError || error.name === "TimeoutError"
       ? "Can’t reach the voice service. Check your connection and retry this turn." : error.message);
@@ -136,10 +166,26 @@ async function sendTurn() {
   } finally {
     working = false;
     speak.disabled = Boolean(pending);
+    if (checkingReceipt && pending) {
+      clearTimeout(receiptTimer);
+      retry.textContent = "Check booking status";
+      if (++receiptChecks <= 6) {
+        receiptTimer = setTimeout(() => void sendTurn(), 2000);
+      } else {
+        retry.hidden = false;
+      }
+    } else {
+      retry.textContent = "Retry this turn";
+    }
   }
 }
 
 async function recordTurn() {
+  if (quote && !playedQuote && audioUrl) {
+    showError("Play the read-back before confirming by voice.");
+    void playReply();
+    return;
+  }
   if (!session || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
     showError("To send a voice order, open this page with HTTPS in a browser that supports microphone recording.");
     return;
@@ -157,7 +203,7 @@ async function recordTurn() {
       .find(type => MediaRecorder.isTypeSupported(type));
     recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     const chunks = [];
-    const prompt = quote;
+    const prompt = playedQuote;
     recorder.addEventListener("dataavailable", event => {
       if (event.data.size) chunks.push(event.data);
     });
@@ -211,6 +257,12 @@ replay.addEventListener("click", () => void playReply());
 retry.addEventListener("click", () => void sendTurn());
 restart.addEventListener("click", beginSession);
 player.addEventListener("play", () => showPhase("playing", "Playing read-back…"));
-player.addEventListener("ended", () => showPhase("idle", quote ? "Ready for your answer" : "Microphone off"));
-window.addEventListener("pagehide", () => microphoneTrack?.stop());
+player.addEventListener("ended", () => {
+  if (speakingQuote && speakingQuote === quote) playedQuote = speakingQuote;
+  showPhase("idle", quote ? "Ready for your answer" : "Microphone off");
+});
+window.addEventListener("pagehide", () => {
+  microphoneTrack?.stop();
+  clearTimeout(receiptTimer);
+});
 beginSession();

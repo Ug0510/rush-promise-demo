@@ -3,9 +3,11 @@ package com.rushpromise.booking;
 import com.rushpromise.booking.BookingModels.Policy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.sql.init.dependency.DependsOnDatabaseInitialization;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -24,6 +26,7 @@ import java.time.Instant;
 import java.util.HexFormat;
 
 @Service
+@DependsOnDatabaseInitialization
 @Profile("!worker")
 public class PolicyService {
     private static final Logger log = LoggerFactory.getLogger(PolicyService.class);
@@ -49,6 +52,11 @@ public class PolicyService {
         this.key = key;
         this.url = url;
         this.refreshMs = refreshMs;
+    }
+
+    @PostConstruct
+    void restoreOnStartup() {
+        if (!key.isBlank()) restoreCache();
     }
 
     @Scheduled(fixedDelayString = "${rush.policy.refresh-ms}")

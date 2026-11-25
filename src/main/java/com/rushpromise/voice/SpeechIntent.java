@@ -10,7 +10,7 @@ import java.util.regex.Pattern;
 final class SpeechIntent {
     private static final Set<String> YES = Set.of("yes", "haan", "han", "ha", "हाँ", "हां", "हा",
             "जी हाँ", "जी हां", "जी", "ठीक है", "theek hai", "thik hai", "yes please", "confirm",
-            "हाँ कर दो", "हां कर दो", "haan kar do", "हाँ पक्का", "हां पक्का", "haan pakka",
+            "हाँ जी", "हां जी", "haan ji", "han ji", "हाँ कर दो", "हां कर दो", "haan kar do", "हाँ पक्का", "हां पक्का", "haan pakka",
             "yes confirm", "पक्का", "pakka");
     private static final Set<String> NO = Set.of("no", "no thanks", "नहीं", "नही", "न", "ना", "nahi",
             "nahin", "nahi chahiye", "नहीं चाहिए", "मत करो", "cancel", "रहने दो", "rehne do");

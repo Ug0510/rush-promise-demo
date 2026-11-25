@@ -46,6 +46,7 @@ import java.util.stream.IntStream;
         "spring.datasource.username=${RUSH_TEST_JDBC_USER:shop_app}",
         "spring.datasource.password=${RUSH_TEST_JDBC_PASSWORD}",
         "rush.demo.date=2031-02-09",
+        "rush.approvals.sweep-ms=600000",
         "rush.staff.token=test-role-staff",
         "rush.owner.token=test-role-owner",
         "rush.operator.token=test-role-operator",
@@ -77,10 +78,12 @@ class BookingPostgresTest {
         assertThat(first.pickupAt()).isEqualTo(Instant.parse("2031-02-09T13:00:00Z"));
         assertThat(first.pricePaise()).isEqualTo(60_000);
         assertThat(amount("A")).isEqualTo(500);
+        var countedAt = db.queryForObject("SELECT counter_counted_at FROM batches WHERE id='A'", java.time.OffsetDateTime.class);
         var order = accept(first).order();
         assertThat(order.id()).isEqualTo(4821);
         assertThat(amount("A")).isZero();
         assertThat(count("SELECT counter_grams_counted FROM batches WHERE id='A'")).isEqualTo(2000);
+        assertThat(db.queryForObject("SELECT counter_counted_at FROM batches WHERE id='A'", java.time.OffsetDateTime.class)).isEqualTo(countedAt);
         assertThat(used("18:30")).isEqualTo(1);
         var alternative = makeQuote(2, "kaju-katli", 500, "18:30");
         assertThat(alternative.reason()).isEqualTo("OUT_OF_STOCK");
@@ -113,8 +116,13 @@ class BookingPostgresTest {
         assertThat(change.quote().pricePaise()).isEqualTo(360_000);
         assertThat(accept(old)).isEqualTo(change);
         assertThat(count("SELECT COUNT(*) FROM orders")).isEqualTo(1);
-        assertThat(accept(change.quote()).order().status()).isEqualTo("AWAITING_APPROVAL");
-        assertThat(shop.orders().getFirst()).isEqualTo(original);
+        var pending = accept(change.quote()).order();
+        assertThat(pending.status()).isEqualTo("AWAITING_APPROVAL");
+        assertThat(original.policy().version()).isEqualTo("v-normal-1");
+        assertThat(original.policy().pickupGraceMinutes()).isEqualTo(30);
+        assertThat(pending.policy().version()).isEqualTo("v-rush-1");
+        assertThat(pending.policy().pickupGraceMinutes()).isEqualTo(20);
+        assertThat(shop.orders()).containsExactly(original, pending);
     }
 
     @Test
@@ -268,6 +276,11 @@ class BookingPostgresTest {
         db.update("UPDATE batches SET ready_at=ready_at + INTERVAL '5 minutes' WHERE id='B'");
         assertThat(accept(q).reason()).isEqualTo("OUT_OF_STOCK");
         assertThat(amount("B")).isEqualTo(1000);
+        shop.reset(null);
+        shop.changeClock("18:00");
+        var exactBoundary = quote(3, "kaju-katli", 500, "18:30");
+        assertThat(exactBoundary.pickupTime()).isEqualTo("18:30");
+        assertThat(accept(exactBoundary).status()).isEqualTo(201);
     }
 
     @Test
@@ -289,12 +302,19 @@ class BookingPostgresTest {
         } finally {
             provider.stop(0);
         }
-        PolicyService restarted = new PolicyService(json, db, "fake-flagsmith-key", url, 50);
-        Thread.sleep(Duration.ofMillis(150));
+        assertThat(Duration.between(primary.current().fetchedAt(), Instant.now())).isLessThan(Duration.ofSeconds(3));
+        Instant staleFetch = Instant.now().minus(Duration.ofMinutes(6));
+        db.update("UPDATE flagsmith_policy_cache SET fetched_at=? WHERE fetched_at=(SELECT max(fetched_at) FROM flagsmith_policy_cache)",
+                staleFetch.atOffset(java.time.ZoneOffset.UTC));
+        PolicyService restarted = new PolicyService(json, db, "fake-flagsmith-key", url, 60_000);
+        restarted.restoreOnStartup();
         restarted.refresh();
-        assertThat(restarted.current().source()).isEqualTo("CACHED");
-        assertThat(Duration.between(restarted.current().fetchedAt(), primary.current().fetchedAt()).abs()).isLessThan(Duration.ofMillis(1));
-        assertThat(restarted.current().rushMode()).isFalse();
+        Policy restored = restarted.current();
+        assertThat(restored.source()).isEqualTo("CACHED");
+        assertThat(Duration.between(restored.fetchedAt(), Instant.now()).toMinutes()).isEqualTo(6);
+        assertThat(Duration.between(restored.fetchedAt(), staleFetch).abs()).isLessThan(Duration.ofMillis(1));
+        assertThat(restarted.current().fetchedAt()).isEqualTo(restored.fetchedAt());
+        assertThat(restored.rushMode()).isFalse();
         PolicyService cold = new PolicyService(json, db, "different-fake-key", url, 50);
         cold.refresh();
         assertThat(cold.current().source()).isEqualTo("FALLBACK");
@@ -313,12 +333,17 @@ class BookingPostgresTest {
         db.update("UPDATE batches SET ready_at=TIMESTAMPTZ '2031-02-09 16:15+05:30' WHERE id='A'");
         db.update("INSERT INTO pickup_slots (pickup_at,capacity) VALUES (TIMESTAMPTZ '2031-02-09 16:30+05:30',1)");
         var q = quote(2, "kaju-katli", 500, "16:30");
+        assertThat(q.expiresAt()).isEqualTo(Instant.parse("2031-02-09T10:47:00Z"));
         shop.changeClock("16:16");
         result = accept(q);
+        assertThat(result.status()).isEqualTo(409);
+        assertThat(result.code()).isEqualTo("CONFLICT");
         assertThat(result.reason()).isEqualTo("TOO_SOON");
         assertThat(result.quote().pickupTime()).isEqualTo("18:00");
         assertThat(amount("A")).isEqualTo(500);
+        assertThat(used("16:30")).isZero();
         assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isZero();
     }
 
     @Test
@@ -343,6 +368,15 @@ class BookingPostgresTest {
         assertThat(used("20:00")).isZero();
         assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE kind='APPROVAL_EXPIRED'")).isEqualTo(1);
         assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE kind='AWAITING_APPROVAL' AND status='SUPPRESSED'")).isEqualTo(1);
+        shop.reset(null);
+        var noSweep = accept(quote(1, "barfi", 4000, "20:00")).order();
+        shop.changeClock("18:01");
+        assertThat(shop.orders().getFirst().status()).isEqualTo("AWAITING_APPROVAL");
+        assertThat(shop.action(noSweep.id(), "approve", null).reason()).isEqualTo("APPROVAL_EXPIRED");
+        assertThat(shop.orders().getFirst().releasedAt()).isNotNull();
+        assertThat(amount("G")).isEqualTo(8000);
+        assertThat(used("20:00")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE kind='APPROVAL_EXPIRED'")).isEqualTo(1);
     }
 
     @Test
@@ -373,6 +407,13 @@ class BookingPostgresTest {
         var results = race(2, i -> accept(candidates.get(i)));
         assertThat(results).extracting(Outcome::code).containsExactlyInAnyOrder("AWAITING_APPROVAL", "PENDING_APPROVAL_LIMIT");
         assertThat(amount("G")).isEqualTo(4000);
+        assertThat(used("20:00") + used("20:30")).isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) FROM orders WHERE status='AWAITING_APPROVAL'")).isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE kind='AWAITING_APPROVAL'")).isEqualTo(1);
+        var next = booking.quote(new QuoteRequest("same-phone-later", "Buyer", phone(1), "barfi", 4000, "20:30")).quote();
+        assertThat(accept(next).code()).isEqualTo("PENDING_APPROVAL_LIMIT");
+        assertThat(amount("G")).isEqualTo(4000);
+        assertThat(used("20:00") + used("20:30")).isEqualTo(1);
         assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isEqualTo(1);
     }
 

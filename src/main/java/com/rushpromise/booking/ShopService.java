@@ -226,7 +226,7 @@ public class ShopService {
         if (preset.equals("incident") && !BookingService.validPhone(request.phone())) return Outcome.error(400, "PHONE_REQUIRED", null);
         return transactions.execute(transaction -> {
             fixture.lock();
-            store.db.execute("TRUNCATE booking_keys, order_events, quotes, booking_sessions, orders, outbox_messages RESTART IDENTITY CASCADE");
+            store.db.execute("TRUNCATE voice_turns, voice_sessions, booking_keys, order_events, quotes, booking_sessions, orders, outbox_messages RESTART IDENTITY CASCADE");
             store.db.execute("ALTER SEQUENCE order_number_seq RESTART WITH 4821");
             var newRun = UUID.randomUUID();
             fixture.seed(newRun);

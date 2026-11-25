@@ -25,15 +25,17 @@ import java.util.concurrent.Semaphore;
 class VoiceController {
     private final SarvamSpeech speech;
     private final VoiceSessionService sessions;
+    private final VoicePrompts prompts;
     private final String sarvamBearer;
     private final String demoHandset;
     private final Semaphore browserSpeech = new Semaphore(6, true);
 
-    VoiceController(SarvamSpeech speech, VoiceSessionService sessions,
+    VoiceController(SarvamSpeech speech, VoiceSessionService sessions, VoicePrompts prompts,
                     @Value("${RUSH_SARVAM_TOOL_TOKEN:}") String sarvamBearer,
                     @Value("${RUSH_DEMO_HANDSET:}") String demoHandset) {
         this.speech = speech;
         this.sessions = sessions;
+        this.prompts = prompts;
         this.sarvamBearer = sarvamBearer;
         this.demoHandset = demoHandset;
     }
@@ -45,24 +47,35 @@ class VoiceController {
                                              @RequestParam(required = false) UUID confirmationQuoteId,
                                              @RequestParam String customerName,
                                              @RequestParam String phone,
-                                             @RequestPart("audio") MultipartFile audio) {
+                                             @RequestParam(defaultValue = "false") boolean receiptOnly,
+                                             @RequestPart(value = "audio", required = false) MultipartFile audio) {
         var turn = turn("browser:" + sessionId, turnId.toString(), sequence, confirmationQuoteId, customerName, phone);
         if (!demoHandset.isBlank() && !demoHandset.equals(turn.phone())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This demo uses the enrolled handset");
         }
-        if (!speech.configured()) throw unavailable();
+        if (!receiptOnly && audio == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "An audio recording is required for a new turn");
+        }
+        if (!receiptOnly && !speech.configured()) throw unavailable();
+        if (receiptOnly) {
+            var reply = receipt(turn);
+            return privateResponse(new BrowserReply(reply, prompts.audio(reply.state(), reply.language()), true));
+        }
         if (!browserSpeech.tryAcquire()) {
-            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Voice is busy. Please try again shortly.");
+            var reply = new VoiceSessionService.Reply("BUSY", "", "Voice is busy. Please retry this turn.", "hi-IN", null, null);
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).cacheControl(CacheControl.noStore())
+                    .body(new BrowserReply(reply, prompts.audio("BUSY", "hi-IN"), true));
         }
         try {
             var reply = run(turn, () -> speech.transcribe(audio));
-            String outputAudio = null;
-            try {
-                outputAudio = speech.synthesize(reply.replyText(), reply.language());
-            } catch (SarvamSpeech.SpeechUnavailable ignored) {
-                // The booking outcome and displayed read-back still apply if audio playback fails.
+            if ("CHECKING_BOOKING".equals(reply.state())) {
+                return privateResponse(new BrowserReply(reply, prompts.audio(reply.state(), reply.language()), true));
             }
-            return privateResponse(new BrowserReply(reply, outputAudio));
+            try {
+                return privateResponse(new BrowserReply(reply, speech.synthesize(reply.replyText(), reply.language()), false));
+            } catch (SarvamSpeech.SpeechUnavailable ignored) {
+                return privateResponse(new BrowserReply(reply, prompts.audio(reply.state(), reply.language()), true));
+            }
         } finally {
             browserSpeech.release();
         }
@@ -90,8 +103,17 @@ class VoiceController {
         if (turnId == null || turnId.isBlank()) turnId = "turn-" + request.sequence();
         var turn = turn(sessionId, turnId, request.sequence(), request.confirmationQuoteId(),
                 request.customerName() == null ? "" : request.customerName(), phone);
+        if ("poll".equals(request.event())) return privateResponse(receipt(turn));
         String utterance = request.utterance() == null ? "" : request.utterance().strip();
         return privateResponse(run(turn, () -> new SarvamSpeech.Transcript(utterance, "hi-IN")));
+    }
+
+    private VoiceSessionService.Reply receipt(VoiceSessionService.Turn turn) {
+        try {
+            return sessions.poll(turn.sessionId(), turn.turnId(), turn.phone());
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ex.getMessage());
+        }
     }
 
     private VoiceSessionService.Reply run(VoiceSessionService.Turn turn, VoiceSessionService.Utterance source) {
@@ -144,7 +166,7 @@ class VoiceController {
         return new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Voice is busy. Please try again shortly.");
     }
 
-    record BrowserReply(VoiceSessionService.Reply turn, String audioWavBase64) {}
+    record BrowserReply(VoiceSessionService.Reply turn, String audioWavBase64, boolean audioFallback) {}
     record SarvamTurn(String event, String interactionId, String turnId, int sequence, UUID confirmationQuoteId,
                       String customerName, String phone, String utterance) {}
 }

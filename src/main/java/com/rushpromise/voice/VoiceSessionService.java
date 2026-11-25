@@ -3,158 +3,175 @@ package com.rushpromise.voice;
 import com.rushpromise.booking.BookingService;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataAccessException;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.TransactionException;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 import static com.rushpromise.booking.BookingModels.*;
 import static com.rushpromise.voice.SpeechIntent.Decision.*;
+import static com.rushpromise.voice.VoiceTurnJournal.*;
 
 @Service
 @Profile("!worker")
 class VoiceSessionService {
-    private static final int MAX_SESSIONS = 600;
-    private static final Duration SESSION_LIFETIME = Duration.ofMinutes(25);
     private static final DateTimeFormatter SPOKEN_TIME = DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH);
-
     private final BookingService booking;
-    private final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
+    private final VoiceTurnJournal journal;
 
-    VoiceSessionService(BookingService booking) {
+    VoiceSessionService(BookingService booking, VoiceTurnJournal journal) {
         this.booking = booking;
+        this.journal = journal;
     }
 
     Reply turn(Turn input, Utterance source) {
-        Session session = session(input.sessionId());
-        synchronized (session) {
-            session.lastSeen = Instant.now();
-            if (session.ended) {
-                return localized(session, "ENDED", "", "This voice session has ended.",
-                        "यह कॉल बंद हो चुकी है।", null, null);
-            }
-            if (session.phone != null && !session.phone.equals(input.phone())) {
-                throw new IllegalArgumentException("Phone cannot change during an active order");
-            }
-            if (session.uncertain != null) return resolve(session, input);
-            Cached previous = session.recent.get(input.turnId());
-            if (previous != null) {
-                if (previous.sequence() != input.sequence()) {
-                    throw new IllegalArgumentException("Turn identifier was already used");
-                }
-                return currentReply(session);
-            }
-            if (input.sequence() <= session.sequence) return currentReply(session);
-            if (session.order != null) return currentReply(session);
+        Access access = journal.claim(input);
+        Session state = access.state();
+        Ticket work = access.ticket();
+        if (work == null) return access.ended() ? ended(state) : currentReply(state);
+        if (!work.status().equals("PROCESSING")) return runBooking(work, state, "");
 
-            SarvamSpeech.Transcript transcript = source.read();
-            String spoken = transcript.text();
-            if (spoken.length() > 1500) throw new IllegalArgumentException("Keep the voice turn short");
-            session.hindi = !"en-IN".equalsIgnoreCase(transcript.language());
-            session.phone = input.phone();
-            Reply response;
-            try {
-                response = apply(session, input, spoken);
-            } catch (DataAccessException ex) {
-                response = localized(session, "UNAVAILABLE", spoken,
-                        "I couldn't check the shop's stock right now. Please try in a moment.",
-                        "अभी दुकान का स्टॉक नहीं देख पा रहा हूँ। कृपया थोड़ी देर में कोशिश करें।", null, null);
-            }
-            var cached = new Cached(input.sequence(), response);
-            session.sequence = input.sequence();
-            session.last = cached;
-            session.recent.put(input.turnId(), cached);
-            if (session.recent.size() > 16) session.recent.pollFirstEntry();
-            return response;
+        SarvamSpeech.Transcript transcript;
+        try {
+            // Audio and the raw transcript stay in the request. No provider call holds a database lock.
+            transcript = source.read();
+        } catch (SarvamSpeech.SpeechUnavailable failure) {
+            var failed = journal.completeSpeech(work, session -> new Decision(unavailable(session), null, false, true));
+            return settled(failed, state);
         }
+        String spoken = transcript.text();
+        if (spoken.length() > 1500) {
+            var failed = journal.completeSpeech(work, session -> new Decision(currentPrompt(session, ""), null, false, true));
+            return settled(failed, state);
+        }
+        Settlement result;
+        try {
+            result = journal.completeSpeech(work, session -> {
+                session.hindi = !"en-IN".equalsIgnoreCase(transcript.language());
+                return apply(session, input, spoken);
+            });
+        } catch (DataAccessException | TransactionException ex) {
+            // A failed acknowledgement could mean assent is already journaled; the recovery job will check.
+            return uncertainReply(state, spoken);
+        }
+        if (result.ticket() == null) return settled(result, state);
+        return runBooking(result.ticket(), state, spoken);
     }
 
     Reply end(String sessionId) {
-        Session session = session(sessionId);
-        synchronized (session) {
-            session.ended = true;
-            return localized(session, "ENDED", "", "This voice session has ended.",
-                    "यह कॉल बंद हो चुकी है।", null, null);
+        return ended(journal.end(sessionId));
+    }
+
+    Reply poll(String sessionId, String turnId, String phone) {
+        Access access = journal.current(sessionId, turnId, phone);
+        return access.ended() ? ended(access.state()) : currentReply(access.state());
+    }
+
+    @Scheduled(fixedDelayString = "${rush.voice.recovery-ms:2000}")
+    void recoverAcceptedTurns() {
+        for (Scope scope : journal.due()) {
+            Ticket work = journal.recover(scope);
+            if (work != null) runBooking(work, new Session(), "");
         }
     }
 
-    private synchronized Session session(String key) {
-        Session existing = sessions.get(key);
-        if (existing != null && existing.lastSeen.isAfter(Instant.now().minus(SESSION_LIFETIME))) return existing;
-        Instant expiredBefore = Instant.now().minus(SESSION_LIFETIME);
-        sessions.entrySet().removeIf(entry -> entry.getValue().lastSeen.isBefore(expiredBefore));
-        if (sessions.size() >= MAX_SESSIONS) throw new VoiceBusy();
-        return sessions.computeIfAbsent(key, ignored -> new Session());
+    @Scheduled(fixedDelay = 60_000)
+    void pruneOldSessions() {
+        journal.prune();
     }
 
-    private Reply apply(Session session, Turn input, String spoken) {
-        if (spoken.isBlank()) return currentPrompt(session, spoken);
+    private Reply runBooking(Ticket work, Session fallback, String transcript) {
+        var accepted = new AcceptRequest(work.scope().sessionId(), work.turnId());
+        Outcome outcome = work.status().equals("UNCERTAIN")
+                ? booking.resolve(work.quoteId().toString(), accepted, null)
+                : booking.accept(work.quoteId().toString(), accepted, null);
+        try {
+            var result = journal.completeBooking(work, state -> {
+                if ("BOOKING_UNCERTAIN".equals(outcome.code())) {
+                    return new Decision(uncertainReply(state, transcript), work.quoteId(), false, false);
+                }
+                if ("BOOKING_NOT_FOUND".equals(outcome.code())) {
+                    state.quote = null;
+                    return Decision.plain(localized(state, "COLLECTING", "",
+                            "The earlier order wasn't booked. Ask for another quote when you're ready.",
+                            "पिछला ऑर्डर बुक नहीं हुआ। तैयार हों तो फिर से समय पूछिए।", null, null));
+                }
+                return Decision.plain(processOutcome(state, transcript, outcome));
+            });
+            return settled(result, fallback);
+        } catch (DataAccessException | TransactionException ex) {
+            return uncertainReply(fallback, transcript);
+        }
+    }
+
+    private Reply settled(Settlement result, Session prior) {
+        if (result.reply() != null) return result.reply();
+        return result.ended() ? ended(prior) : currentReply(prior);
+    }
+
+    private Reply ended(Session session) {
+        return localized(session, "ENDED", "", "This voice session has ended.", "यह कॉल बंद हो चुकी है।", null, null);
+    }
+
+    private Reply unavailable(Session session) {
+        var prompt = currentReply(session);
+        String apology = session.hindi ? "आपकी बात सुन नहीं पाया। " : "I couldn't hear that. ";
+        return new Reply(prompt.state(), "", apology + prompt.replyText(), prompt.language(), prompt.quote(), prompt.order());
+    }
+
+    private Decision apply(Session session, Turn input, String spoken) {
+        if (spoken.isBlank()) {
+            if (++session.silences >= 3) {
+                session.quote = null;
+                Reply goodbye = localized(session, "ENDED", "", "I'll end the call for now. Thank you.",
+                        "अभी कॉल बंद कर रहा हूँ। धन्यवाद।", null, null);
+                return new Decision(goodbye, null, true, false);
+            }
+            return Decision.plain(currentPrompt(session, spoken));
+        }
+        session.silences = 0;
         var intent = SpeechIntent.parse(spoken);
         if (intent.decision() == NO) {
             session.quote = null;
-            return localized(session, "COLLECTING", spoken,
+            return Decision.plain(localized(session, "COLLECTING", spoken,
                     "Okay, I haven't booked anything. Tell me what you'd like instead.",
-                    "ठीक है, कुछ बुक नहीं हुआ। बताइए आपको क्या चाहिए।", null, null);
+                    "ठीक है, कुछ बुक नहीं हुआ। बताइए आपको क्या चाहिए।", null, null));
         }
         if (intent.decision() == YES) {
             if (session.quote == null || !session.quote.id().equals(input.confirmationQuoteId())) {
-                return currentPrompt(session, spoken);
+                return Decision.plain(currentPrompt(session, spoken));
             }
-            Quote accepted = session.quote;
-            Outcome result = booking.accept(accepted.id().toString(),
-                    new AcceptRequest(input.sessionId(), input.turnId()), null);
-            if ("BOOKING_UNCERTAIN".equals(result.code())) {
-                session.uncertain = new Pending(accepted.id(), input.turnId());
-                return uncertainReply(session, spoken);
-            }
-            return processOutcome(session, spoken, result);
+            return new Decision(uncertainReply(session, spoken), session.quote.id(), false, false);
         }
-        if (intent.decision() == UNCLEAR) return currentPrompt(session, spoken);
+        if (intent.decision() == UNCLEAR) return Decision.plain(currentPrompt(session, spoken));
 
         if (intent.sku() != null) session.sku = intent.sku();
         if (intent.grams() != null) session.grams = intent.grams();
         if (intent.pickupTime() != null) session.pickupTime = intent.pickupTime();
         session.quote = null;
         if (session.sku == null || session.grams == null || session.pickupTime == null) {
-            return currentPrompt(session, spoken);
+            return Decision.plain(currentPrompt(session, spoken));
         }
         String name = input.customerName().isBlank() ? "Caller" : input.customerName();
         Outcome result = booking.quote(new QuoteRequest(input.sessionId(), name, input.phone(),
                 session.sku, session.grams, session.pickupTime));
-        return processOutcome(session, spoken, result);
+        return Decision.plain(processOutcome(session, spoken, result));
     }
 
-    private Reply resolve(Session session, Turn input) {
-        Pending pending = session.uncertain;
-        Outcome resolved = booking.resolve(pending.quoteId().toString(),
-                new AcceptRequest(input.sessionId(), pending.turnId()), null);
-        if ("BOOKING_UNCERTAIN".equals(resolved.code())) return session.last.reply();
-        session.uncertain = null;
-        Reply reply;
-        if ("BOOKING_NOT_FOUND".equals(resolved.code())) {
-            session.quote = null;
-            reply = localized(session, "COLLECTING", "",
-                    "The earlier order wasn't booked. Ask for another quote when you're ready.",
-                    "पिछला ऑर्डर बुक नहीं हुआ। तैयार हों तो फिर से समय पूछिए।", null, null);
-        } else {
-            reply = processOutcome(session, "", resolved);
-        }
-        session.sequence = Math.max(session.sequence, input.sequence());
-        session.last = new Cached(input.sequence(), reply);
-        session.recent.put(input.turnId(), session.last);
-        return reply;
+    private Reply currentReply(Session session) {
+        return session.last == null ? currentPrompt(session, "") : session.last;
     }
 
     private Reply processOutcome(Session session, String transcript, Outcome outcome) {
         session.quote = outcome.quote();
         if (outcome.order() != null) {
-            session.order = outcome.order();
+            var order = outcome.order();
+            session.order = new SavedOrder(order.id(), order.itemName(), order.grams(), order.pricePaise(), order.pickupTime(), order.status());
             long number = session.order.id();
             boolean approval = "AWAITING_APPROVAL".equals(session.order.status());
             String time = spokenTime(session.order.pickupTime());
@@ -163,7 +180,7 @@ class VoiceSessionService {
                             : "Confirmed. Your order number is " + number + ". Pickup at " + time + ".",
                     approval ? "नंबर " + number + " दुकान की मंज़ूरी का इंतज़ार कर रहा है।"
                             : "ऑर्डर पक्का है। आपका ऑर्डर नंबर " + number + " है। पिकअप " + time + " बजे है।",
-                    null, session.order);
+                    null, order);
         }
         if (session.quote != null) {
             session.sku = session.quote.sku();
@@ -182,10 +199,6 @@ class VoiceSessionService {
                     "I don't have an available box for that request. Tell me another item, amount, or time.",
                     "इस ऑर्डर के लिए डिब्बा उपलब्ध नहीं है। कोई और मिठाई, वज़न या समय बताइए।", null, null);
         };
-    }
-
-    private Reply currentReply(Session session) {
-        return session.last == null ? currentPrompt(session, "") : session.last.reply();
     }
 
     private Reply currentPrompt(Session session, String transcript) {
@@ -252,23 +265,5 @@ class VoiceSessionService {
     record Offer(UUID id, String itemName, int grams, int pricePaise, String pickupTime, boolean requiresApproval, Instant expiresAt) {}
     record SavedOrder(long id, String itemName, int grams, int pricePaise, String pickupTime, String status) {}
     record Reply(String state, String transcript, String replyText, String language, Offer quote, SavedOrder order) {}
-    private record Pending(UUID quoteId, String turnId) {}
-    private record Cached(int sequence, Reply reply) {}
     static final class VoiceBusy extends RuntimeException {}
-
-    private static final class Session {
-        private volatile Instant lastSeen = Instant.now();
-        private final LinkedHashMap<String, Cached> recent = new LinkedHashMap<>();
-        private int sequence;
-        private String phone;
-        private String sku;
-        private Integer grams;
-        private String pickupTime;
-        private Quote quote;
-        private Order order;
-        private Pending uncertain;
-        private boolean hindi = true;
-        private boolean ended;
-        private Cached last;
-    }
 }
