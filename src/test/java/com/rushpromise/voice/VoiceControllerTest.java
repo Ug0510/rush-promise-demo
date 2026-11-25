@@ -1,5 +1,7 @@
 package com.rushpromise.voice;
 
+import com.rushpromise.delivery.BuyerWhatsApp;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rushpromise.booking.GuestCheckouts;
 import com.rushpromise.platform.SarvamShopRouting;
@@ -33,7 +35,7 @@ class VoiceControllerTest {
     private final VoiceConversation conversation = mock(VoiceConversation.class);
     private final SarvamShopRouting routing = mock(SarvamShopRouting.class);
     private final VoiceController controller = new VoiceController(speech, sessions, new VoicePrompts(), conversation,
-            routing, mock(GuestCheckouts.class), BEARER, PHONE);
+            routing, mock(GuestCheckouts.class), mock(BuyerWhatsApp.class), BEARER, PHONE);
 
     @Test
     void bookingResultsHaveDistinctSavedAudioWhenSpeechSynthesisFails() {

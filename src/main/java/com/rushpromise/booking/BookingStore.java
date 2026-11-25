@@ -9,6 +9,7 @@ import com.rushpromise.booking.BookingModels.PickupHours;
 import com.rushpromise.booking.BookingModels.Quote;
 import com.rushpromise.booking.BookingModels.ShopProfile;
 import com.rushpromise.delivery.OwnerWhatsApp;
+import com.rushpromise.delivery.BuyerWhatsApp;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -37,13 +38,15 @@ class BookingStore {
     private final boolean demo;
     private final boolean merchantDemoClock;
     private final OwnerWhatsApp ownerWhatsApp;
+    final BuyerWhatsApp buyerWhatsApp;
 
-    BookingStore(JdbcTemplate db, ObjectMapper json, Environment environment, OwnerWhatsApp ownerWhatsApp) {
+    BookingStore(JdbcTemplate db, ObjectMapper json, Environment environment, OwnerWhatsApp ownerWhatsApp, BuyerWhatsApp buyerWhatsApp) {
         this.db = db;
         this.json = json;
         this.demo = environment.matchesProfiles("demo");
         this.merchantDemoClock = environment.getProperty("RUSH_MERCHANT_DEMO_CLOCK", Boolean.class, false);
         this.ownerWhatsApp = ownerWhatsApp;
+        this.buyerWhatsApp = buyerWhatsApp;
     }
 
     Shop shop() {

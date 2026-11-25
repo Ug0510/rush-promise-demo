@@ -46,6 +46,13 @@ final class TwilioWhatsApp {
         return sendMessage(dispatch);
     }
 
+    DeliveryResult sendBuyer(OutboxRepository.Dispatch dispatch) {
+        if (!"PICKUP_CONFIRMATION".equals(dispatch.kind()) || !dispatch.recipient().matches("\\+[1-9][0-9]{7,14}")) {
+            throw new IllegalArgumentException("Invalid verified buyer pickup dispatch");
+        }
+        return sendMessage(dispatch);
+    }
+
     private DeliveryResult sendMessage(OutboxRepository.Dispatch dispatch) {
         String credentials = settings.accountSid() + ":" + settings.authToken();
         String auth = Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));

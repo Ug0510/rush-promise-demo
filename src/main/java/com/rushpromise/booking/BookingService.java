@@ -433,6 +433,7 @@ public class BookingService {
         var order = store.order(number);
         store.event(order, status, shop.now());
         store.message(order, status);
+        if (session.kind() == NativeIdentityKind.CALL) store.buyerWhatsApp.confirmed(quote.sessionId(), order);
         return order;
     }
 

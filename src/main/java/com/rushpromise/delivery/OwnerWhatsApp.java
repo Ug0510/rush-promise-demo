@@ -217,7 +217,7 @@ public class OwnerWhatsApp {
         }
     }
 
-    private static boolean validWebhook(String endpoint) {
+    static boolean validWebhook(String endpoint) {
         try {
             URI uri = URI.create(endpoint);
             return "https".equals(uri.getScheme()) && uri.getHost()!=null && INBOUND_PATH.equals(uri.getRawPath())

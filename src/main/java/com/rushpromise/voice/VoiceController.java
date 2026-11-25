@@ -1,5 +1,7 @@
 package com.rushpromise.voice;
 
+import com.rushpromise.delivery.BuyerWhatsApp;
+
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.DeserializationContext;
@@ -57,12 +59,13 @@ class VoiceController {
     private final VoiceConversation conversation;
     private final SarvamShopRouting routing;
     private final GuestCheckouts guestCheckouts;
+    private final BuyerWhatsApp buyerWhatsApp;
     private final String sarvamBearer;
     private final String demoHandset;
     private final Semaphore browserSpeech = new Semaphore(6, true);
 
     VoiceController(SarvamSpeech speech, VoiceSessionService sessions, VoicePrompts prompts, VoiceConversation conversation,
-                    SarvamShopRouting routing, GuestCheckouts guestCheckouts,
+                    SarvamShopRouting routing, GuestCheckouts guestCheckouts, BuyerWhatsApp buyerWhatsApp,
                     @Value("${RUSH_SARVAM_TOOL_TOKEN:}") String sarvamBearer,
                     @Value("${RUSH_DEMO_HANDSET:}") String demoHandset) {
         this.speech = speech;
@@ -71,6 +74,7 @@ class VoiceController {
         this.conversation = conversation;
         this.routing = routing;
         this.guestCheckouts = guestCheckouts;
+        this.buyerWhatsApp = buyerWhatsApp;
         this.sarvamBearer = sarvamBearer;
         this.demoHandset = demoHandset;
     }
@@ -240,6 +244,12 @@ class VoiceController {
                                                  boolean pinned, boolean acceptNativeSubject) {
         if ("start".equals(request.event())) return privateResponse(conversation.greet(language));
         if ("menu".equals(request.event())) return privateResponse(conversation.menu(language));
+        if ("buyer-whatsapp".equals(request.event())) {
+            if (!pinned || !acceptNativeSubject || !"interaction".equals(request.pickupMode())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN);
+            }
+            return privateResponse(buyerWhatsApp.offer(sessionId, language));
+        }
         if ("end".equals(request.event())) {
             try {
                 return privateResponse(sessions.end(sessionId));
@@ -312,13 +322,23 @@ class VoiceController {
         }
         try {
             boolean interaction = "interaction".equals(request.pickupMode());
+            VoiceSessionService.Reply reply;
             if ("poll".equals(request.event())) {
-                return privateResponse(interaction ? sessions.nativeInteractionPoll(sessionId, turnId)
-                        : sessions.nativePickupPoll(sessionId, turnId, subject));
+                reply = interaction ? sessions.nativeInteractionPoll(sessionId, turnId)
+                        : sessions.nativePickupPoll(sessionId, turnId, subject);
+            } else {
+                VoiceSessionService.Utterance spoken = () -> new SarvamSpeech.Transcript(utterance, language);
+                reply = interaction ? sessions.nativeInteractionTurn(sessionId, turnId, sequence, request.confirmationQuoteId(), name, spoken)
+                        : sessions.nativePickupTurn(sessionId, turnId, sequence, request.confirmationQuoteId(), name, subject, spoken);
             }
-            VoiceSessionService.Utterance spoken = () -> new SarvamSpeech.Transcript(utterance, language);
-            return privateResponse(interaction ? sessions.nativeInteractionTurn(sessionId, turnId, sequence, request.confirmationQuoteId(), name, spoken)
-                    : sessions.nativePickupTurn(sessionId, turnId, sequence, request.confirmationQuoteId(), name, subject, spoken));
+            if (interaction && reply.order() != null && "CONFIRMED".equals(reply.state())
+                    && buyerWhatsApp.queued(sessionId, reply.order().id())) {
+                String note = "hi-IN".equals(reply.language()) ? " यही कोड व्हाट्सऐप पर भेजने के लिए रखा गया है।"
+                        : " We’ve queued a WhatsApp with this same code.";
+                reply = new VoiceSessionService.Reply(reply.state(), reply.transcript(), reply.replyText() + note,
+                        reply.language(), reply.quote(), reply.order());
+            }
+            return privateResponse(reply);
         } catch (IllegalArgumentException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ex.getMessage());
         } catch (VoiceSessionService.VoiceBusy ex) {

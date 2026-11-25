@@ -6,11 +6,11 @@
   <meta name="theme-color" content="#f2f3f0">
   <title>Owner workspace · Rush Promise</title>
   <link rel="stylesheet" href="/voice-ui/caller.css">
-  <link rel="stylesheet" href="/owner-ui/owner.css?v=20261125-owner-demo">
+  <link rel="stylesheet" href="/owner-ui/owner.css?v=20261125-existing-shops">
   <link rel="stylesheet" href="/owner-ui/pickup-hours.css?v=20261125-phone">
   <script defer src="/owner-ui/pickup-hours.js"></script>
   <script defer src="/owner-ui/phone-notifications.js?v=20261125-phone"></script>
-  <script defer src="/owner-ui/owner.js?v=20261125-owner-demo"></script>
+  <script defer src="/owner-ui/owner.js?v=20261125-existing-shops"></script>
 </head>
 <body>
   <div class="owner-shell">
@@ -28,10 +28,11 @@
       <p id="loading" role="status" class="loading">Opening the owner workspace…</p>
       <p id="demo-owner-banner" class="demo-owner-banner" hidden>Sample shop. Your changes stay in this demo for up to two hours.</p>
       <section id="owner-auth" class="auth-grid" hidden aria-labelledby="auth-title">
-        <aside class="surface demo-entry" id="demo-owner-entry">
-          <div><p>Try the owner desk with Deepak’s sample inventory. Changes stay in your demo.</p>
-            <p id="demo-entry-error" class="form-error" role="alert" hidden></p></div>
-          <button id="start-owner-demo" type="button" class="button primary">Try Deepak’s demo shop</button>
+        <aside class="surface demo-entry" id="demo-owner-entry" aria-labelledby="demo-shop-title" hidden>
+          <div><h2 id="demo-shop-title">Open an existing shop’s demo desk</h2>
+            <p>See the existing menu, prices and pickup hours. Shop owners can sign in with their own password.</p></div>
+          <div class="demo-shop-choices" id="demo-shop-choices" aria-label="Choose a shop"></div>
+          <p id="demo-entry-error" class="form-error" role="alert" hidden></p>
         </aside>
         <form id="auth-form" class="surface auth-form">
           <h1 id="auth-title">Sign in to your shop</h1>
@@ -55,6 +56,21 @@
           <h2>Set up your shop</h2>
           <ol><li>Add shop details</li><li>Set prices and stock</li><li>Take pickup orders</li></ol>
         </aside>
+      </section>
+
+      <section class="surface settings-form demo-shop-menu" id="demo-shop-menu" aria-labelledby="demo-shop-name" hidden>
+        <p class="film">Read-only pickup desk preview</p>
+        <h1 id="demo-shop-name" tabindex="-1"></h1>
+        <p id="demo-shop-hours"></p>
+        <table class="demo-menu-table">
+          <thead><tr><th scope="col">Menu item</th><th scope="col">Price</th></tr></thead>
+          <tbody id="demo-shop-products"></tbody>
+        </table>
+        <p id="demo-shop-empty" hidden>There are no public menu items yet.</p>
+        <div class="demo-shop-choices">
+          <button id="demo-owner-login" type="button" class="button primary">Sign in as this shop’s owner</button>
+          <button id="demo-return" type="button" class="button quiet">Choose another shop</button>
+        </div>
       </section>
 
       <section id="shop-panel" class="surface settings-form" hidden aria-labelledby="shop-title">

@@ -19,7 +19,7 @@ let operation = false;
 let fetching = false;
 let slugEdited = false;
 let hoursReady = false;
-let demoKey;
+let demoShop;
 
 function setText(id, text) {
   const slot = $(id);
@@ -56,6 +56,7 @@ function authView(mode = "login") {
   authMode = mode === "signup" && signupEnabled ? "signup" : "login";
   const create = authMode === "signup";
   $("owner-auth").hidden = false;
+  $("demo-shop-menu").hidden = true;
   if ($("demo-owner-banner")) $("demo-owner-banner").hidden = true;
   $("shop-panel").hidden = $("menu-panel").hidden = $("owner-nav").hidden = $("owner-tools").hidden = true;
   $("brand-shop").hidden = true;
@@ -100,6 +101,7 @@ function signedOut(text) {
 function show(view) {
   const shop = session?.shop;
   $("owner-auth").hidden = true;
+  $("demo-shop-menu").hidden = true;
   if ($("demo-owner-banner")) $("demo-owner-banner").hidden = session?.demoPreview !== true;
   $("loading").hidden = true;
   $("owner-tools").hidden = false;
@@ -315,41 +317,68 @@ authForm.addEventListener("submit", async event => {
       : error.status === 404 ? "New accounts aren't available here. Sign in with your owner account."
       : error.status === 400 ? "Check your username and password." : "Sign-in is temporarily unavailable.";
     if (error.status === 404) authView("login");
-    setText("auth-error", text);
+    if (error.status === 400 && /^username\b/i.test(error.message)) credentialError("username", error.message);
+    else if (error.status === 400 && /^password\b/i.test(error.message)) credentialError("password", error.message);
+    else setText("auth-error", text);
   } finally {
     operation = false;
     $("auth-submit").disabled = false;
   }
 });
 
-$("start-owner-demo")?.addEventListener("click", async () => {
-  if (operation || session) return;
-  const button = $("start-owner-demo");
-  operation = true;
-  button.disabled = true;
-  button.textContent = "Opening sample shop…";
+function showDemoChoices(choices) {
+  $("demo-owner-entry").hidden = !choices.length;
+  $("demo-shop-choices").replaceChildren(...choices.map(shop => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button quiet";
+    button.textContent = shop.displayName;
+    button.setAttribute("aria-label", `Open ${shop.displayName} demo desk`);
+    button.addEventListener("click", () => void showDemoShop(shop));
+    return button;
+  }));
+}
+
+async function showDemoShop(shop) {
+  if (session) return;
+  demoShop = shop;
+  $("demo-shop-menu").hidden = true;
   setText("demo-entry-error", "");
   try {
-    try {
-      demoKey ||= sessionStorage.getItem("rush-owner-preview") || crypto.randomUUID();
-      sessionStorage.setItem("rush-owner-preview", demoKey);
-    } catch {
-      demoKey ||= crypto.randomUUID();
-    }
-    session = await api("/api/auth/demo", { method: "POST", body: { sessionKey: demoKey } });
-    history.replaceState(null, "", "#menu");
-    $("owner-password").value = "";
-    show("menu");
-    status(true);
-  } catch (error) {
-    setText("demo-entry-error", error.status === 409 ? "An owner is already signed in. Reload to continue in that shop."
-      : "The sample shop could not open. Try again in a moment.");
-  } finally {
-    operation = false;
-    button.disabled = false;
-    button.textContent = "Try Deepak’s demo shop";
+    const storefront = await api(`/api/storefront/${encodeURIComponent(shop.slug)}`);
+    if (demoShop !== shop || session) return;
+    $("demo-shop-name").textContent = storefront.shop.displayName;
+    const hours = storefront.pickupHours;
+    $("demo-shop-hours").textContent = hours?.allDay ? "All-day pickup (IST)"
+      : hours?.opensAt && hours?.closesAt ? `Pickup ${hours.opensAt}–${hours.closesAt} IST` : "Pickup hours unavailable";
+    const items = storefront.menu?.items || [];
+    $("demo-shop-products").replaceChildren(...items.map(item => {
+      const row = document.createElement("tr");
+      const name = document.createElement("td");
+      const price = document.createElement("td");
+      const unit = item.unit === "PIECE" ? "piece" : "kg";
+      name.textContent = item.itemName;
+      price.textContent = `${currency.format(item.pricePerUnitPaise / 100)} per ${unit}`;
+      row.append(name, price);
+      return row;
+    }));
+    $("demo-shop-empty").hidden = !!items.length;
+    $("owner-auth").hidden = true;
+    $("demo-shop-menu").hidden = false;
+    $("demo-shop-name").focus();
+  } catch {
+    if (demoShop === shop) setText("demo-entry-error", "Could not load this shop’s public menu. Try again.");
   }
+}
+
+$("demo-owner-login")?.addEventListener("click", () => {
+  if (!demoShop || session) return;
+  authView("login");
+  history.replaceState(null, "", location.pathname);
+  $("owner-username").value = demoShop.username;
+  $("owner-password").focus();
 });
+$("demo-return")?.addEventListener("click", () => authView("login"));
 
 $("show-password").addEventListener("click", togglePassword);
 $("auth-switch").addEventListener("click", () => authView(authMode === "login" ? "signup" : "login"));
@@ -453,7 +482,6 @@ $("owner-logout").addEventListener("click", async () => {
   try {
     await api("/api/auth/logout", { method: "POST" });
     if (session.demoPreview === true) {
-      demoKey = null;
       try { sessionStorage.removeItem("rush-owner-preview"); } catch { }
     }
     history.replaceState(null, "", location.pathname);
@@ -479,6 +507,8 @@ async function load() {
     return;
   }
   authView(location.hash === "#signup" ? "signup" : "login");
+  const choices = Array.isArray(options.value?.demoShops) ? options.value.demoShops : [];
+  showDemoChoices(choices);
   if (owner.reason.status !== 401 && owner.reason.status !== 404) setText("auth-error", "The owner workspace could not connect. Try again.");
 }
 void load();

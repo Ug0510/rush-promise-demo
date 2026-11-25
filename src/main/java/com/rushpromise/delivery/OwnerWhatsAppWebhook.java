@@ -19,20 +19,23 @@ import java.util.regex.Pattern;
 class OwnerWhatsAppWebhook {
     private static final Pattern LINK = Pattern.compile("LINK (RP[0-9A-F]{14})");
     private static final Pattern PIN = Pattern.compile("(?:PIN|पिन)(?: ([a-z0-9]+(?:-[a-z0-9]+)*))?", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PICKUP = Pattern.compile("PICKUP ([1-9][0-9]{7})", Pattern.CASE_INSENSITIVE);
     private final OwnerWhatsApp links;
     private final DeliverySettings settings;
     private final OwnerPhoneAccess access;
+    private final BuyerWhatsApp buyers;
 
-    OwnerWhatsAppWebhook(OwnerWhatsApp links, DeliverySettings settings, OwnerPhoneAccess access) {
+    OwnerWhatsAppWebhook(OwnerWhatsApp links, DeliverySettings settings, OwnerPhoneAccess access, BuyerWhatsApp buyers) {
         this.links = links;
         this.settings = settings;
         this.access = access;
+        this.buyers = buyers;
     }
 
     @PostMapping(path = OwnerWhatsApp.INBOUND_PATH, consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE,
         produces = MediaType.APPLICATION_XML_VALUE)
     String inbound(HttpServletRequest request) {
-        if (!links.enabled()) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
+        if (!links.enabled() && !buyers.enabled()) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
         String signature = request.getHeader("X-Twilio-Signature");
         Map<String, String[]> parameters = new TreeMap<>(request.getParameterMap());
         if (request.getQueryString() != null || signature == null
@@ -51,6 +54,13 @@ class OwnerWhatsAppWebhook {
         if (!links.firstInbound(sid)) return response(null);
         String recipient = from.substring("whatsapp:".length());
         String command = body.strip().replaceAll("\\s+", " ");
+        var pickup = PICKUP.matcher(command);
+        if (pickup.matches()) {
+            buyers.pair(pickup.group(1), recipient);
+            return response(null);
+        }
+        if ("STOP".equalsIgnoreCase(command)) buyers.revoke(recipient);
+        if (!links.enabled()) return response(null);
         var link = LINK.matcher(command.toUpperCase(Locale.ROOT));
         if (link.matches()) {
             return response(links.link(link.group(1), recipient)

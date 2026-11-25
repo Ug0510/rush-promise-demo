@@ -21,8 +21,10 @@ class NotificationWorker {
     private final TwilioWhatsApp provider;
     private final TenantDirectory tenants;
     private final OwnerWhatsApp owners;
+    private final BuyerWhatsApp buyers;
 
     NotificationWorker(OutboxRepository outbox, DeliverySettings settings, ObjectMapper json, TenantDirectory tenants, OwnerWhatsApp owners,
+                       BuyerWhatsApp buyers,
                        @Value("${RUSH_WORKER_BOOT:ready}") String boot) {
         if (!boot.equals("ready")) {
             throw new IllegalStateException("Worker startup blocked by this isolated demo revision");
@@ -31,6 +33,7 @@ class NotificationWorker {
         this.settings = settings;
         this.tenants = tenants;
         this.owners = owners;
+        this.buyers = buyers;
         if (settings.live()) {
             settings.requireLiveConfiguration();
         }
@@ -39,13 +42,25 @@ class NotificationWorker {
 
     @Scheduled(fixedDelayString = "${RUSH_WORKER_POLL_MS:750}")
     void poll() {
-        forEachQueue(this::deliverOne);
+        forEachQueue(() -> {
+            deliverOne();
+            deliverBuyer();
+        });
         if (provider == null || !owners.enabled()) return;
         var dispatch = owners.claim();
         if (dispatch == null) return;
         var result = owners.stillPermitted(dispatch) ? provider.sendOwner(dispatch)
             : new DeliveryResult("SUPPRESSED", null, "OWNER_WINDOW_CLOSED");
         owners.observe(dispatch.attemptId(), result);
+    }
+
+    private void deliverBuyer() {
+        if (provider == null) return;
+        var dispatch = buyers.claim();
+        if (dispatch == null) return;
+        var result = buyers.stillPermitted(dispatch) ? provider.sendBuyer(dispatch)
+                : new DeliveryResult("SUPPRESSED", null, "BUYER_CONSENT_OR_ORDER_CHANGED");
+        buyers.observe(dispatch.attemptId(), result);
     }
 
     private void deliverOne() {
@@ -71,7 +86,10 @@ class NotificationWorker {
 
     @Scheduled(fixedDelay = 5000)
     void recover() {
-        forEachQueue(outbox::recoverLeases);
+        forEachQueue(() -> {
+            outbox.recoverLeases();
+            buyers.recover();
+        });
         if (owners.enabled()) owners.recover();
     }
 

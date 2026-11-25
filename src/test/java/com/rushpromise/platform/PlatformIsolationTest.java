@@ -66,7 +66,6 @@ class PlatformIsolationTest {
     @Autowired PlatformContextFilter filter;
     @Autowired TenantDirectory tenants;
     @Autowired SarvamShopRouting nativeRouting;
-    @Autowired DemoPreviews previews;
     @Autowired BookingService bookings;
     @MockitoBean SlotPolicyProvider slotPolicies;
 
@@ -74,14 +73,18 @@ class PlatformIsolationTest {
     void routedOpaqueSubjectUsesShopPolicyWithoutSendingOrForgingContact() throws Exception {
         String subject = "c".repeat(64);
         String nonce = UUID.randomUUID().toString().substring(0, 8);
-        var mithai = signup("native-mithai-" + nonce);
-        var bakery = signup("native-bakery-" + nonce);
+        var mithai = signup("deepak-owner");
+        var bakery = signup("viraj-owner");
         shop(mithai, "deepak-mithai-bhandar", "Deepak Mithai Bhandar");
         shop(bakery, "virajs-bakery", "Viraj's Bakery");
         var mithaiShop = tenants.bySlug("deepak-mithai-bhandar");
         var bakeryShop = tenants.bySlug("virajs-bakery");
         tenants.markFixture(mithaiShop);
         tenants.markFixture(bakeryShop);
+        var choices = response(get("/api/auth/options"), 200).path("demoShops");
+        assertThat(choices.findValuesAsText("slug")).containsExactly("deepak-mithai-bhandar", "virajs-bakery");
+        assertThat(choices.findValuesAsText("username")).containsExactly("deepak-owner", "viraj-owner");
+        assertThat(choices.toString()).doesNotContain("password", "csrf", "phone", "pickupCode", PASSWORD);
         setClock(mithaiShop.schema());
         setClock(bakeryShop.schema());
         response(owner(body(post("/api/owner/products"), Map.of("sku", "barfi", "itemName", "Barfi",
@@ -750,55 +753,47 @@ class PlatformIsolationTest {
     }
 
     @Test
-    void demoSessionsReuseAnIsolatedEditableShopWithoutUsingRealRegistrationSlots() throws Exception {
-        String suffix=UUID.randomUUID().toString().substring(0,8);
-        int registrations=db.queryForObject("SELECT count(*) FROM public.rush_accounts WHERE preview_expires_at IS NULL",Integer.class);
-        UUID key=UUID.randomUUID();
-        mvc.perform(body(post("/api/auth/demo").header("Origin","https://unrelated.example"),Map.of("sessionKey",key)))
-                .andExpect(status().isForbidden());
-        var first=demo(key);
-        var repeated=demo(key);
-        var separate=demo(UUID.randomUUID());
-        assertThat(first.slug()).isEqualTo(repeated.slug()).isNotEqualTo(separate.slug());
-        assertThat(db.queryForObject("SELECT count(*) FROM public.rush_accounts WHERE preview_expires_at IS NULL",Integer.class)).isEqualTo(registrations);
-        var early=response(owner(get("/api/owner/products"),first.credential()),200);
-        assertThat(early.findValuesAsText("sku")).containsExactlyInAnyOrder("barfi","kaju-katli");
-        assertThat(response(owner(get("/api/owner/pickup-hours"),first.credential()),200).at("/closesAt").asText()).isEqualTo("21:00");
-        response(owner(body(post("/api/owner/products"),Map.of("sku","barfi","itemName","Barfi","unit","GRAMS",
-                "pricePerUnitPaise",90000,"stockQuantity",1800)),first.credential()),200);
-        assertThat(response(owner(get("/api/owner/products"),repeated.credential()),200).at("/0/freeQuantity").asInt()).isEqualTo(1800);
-        assertThat(response(owner(get("/api/owner/products"),separate.credential()),200).at("/0/freeQuantity").asInt()).isEqualTo(3000);
-        assertThat(response(owner(get("/api/staff/snapshot"),first.credential()),200).at("/orders").size()).isZero();
-        mvc.perform(get("/api/storefront/"+first.slug())).andExpect(status().isNotFound());
-        assertThat(response(get("/api/public/shops").param("query",first.slug()),200).at("/shops").size()).isZero();
-        assertThat(nativeRouting.choose("fixture-preview-blocked",first.slug())).isNull();
-        mvc.perform(owner(post("/api/owner/phone/access"),first.credential())).andExpect(status().isForbidden());
-        mvc.perform(owner(post("/api/owner/whatsapp/link"),first.credential())).andExpect(status().isForbidden());
-        mvc.perform(owner(post("/api/quotes"),first.credential())).andExpect(status().isForbidden());
-        mvc.perform(body(post("/api/auth/signup"),Map.of("username","not an email","password",PASSWORD)))
+    void publicDemoNeverCreatesAnAccountOrShopAndLegacySessionRetainsItsExistingScope() throws Exception {
+        int accountsBefore = db.queryForObject("SELECT count(*) FROM public.rush_accounts", Integer.class);
+        int shopsBefore = db.queryForObject("SELECT count(*) FROM public.rush_tenants", Integer.class);
+        var info = response(get("/api/auth/options"), 200);
+        assertThat(info.path("signupEnabled").asBoolean()).isTrue();
+        assertThat(info.path("demoAvailable").asBoolean()).isFalse();
+        UUID key = UUID.randomUUID();
+        for (int retry = 0; retry < 3; retry++) {
+            mvc.perform(body(post("/api/auth/demo"), Map.of("sessionKey", key)))
+                    .andExpect(status().isGone()).andExpect(result -> assertThat(result.getResponse().getHeader("Set-Cookie")).isNull());
+        }
+        assertThat(db.queryForObject("SELECT count(*) FROM public.rush_accounts", Integer.class)).isEqualTo(accountsBefore);
+        assertThat(db.queryForObject("SELECT count(*) FROM public.rush_tenants", Integer.class)).isEqualTo(shopsBefore);
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        mvc.perform(body(post("/api/auth/signup"), Map.of("username", "not an email", "password", PASSWORD)))
                 .andExpect(status().isBadRequest()).andExpect(result -> assertThat(result.getResolvedException().getMessage()).contains("Username"));
-        mvc.perform(body(post("/api/auth/signup"),Map.of("username","valid-"+suffix,"password","too-short")))
+        mvc.perform(body(post("/api/auth/signup"), Map.of("username", "valid-" + suffix, "password", "too-short")))
                 .andExpect(status().isBadRequest()).andExpect(result -> assertThat(result.getResolvedException().getMessage()).contains("Password"));
-        var normal=signup("valid-"+suffix);
-        mvc.perform(owner(body(post("/api/auth/demo"),Map.of("sessionKey",UUID.randomUUID())),normal)).andExpect(status().isConflict());
-        db.update("UPDATE public.rush_accounts SET preview_expires_at=statement_timestamp()-interval '1 second'"
-                + " WHERE id=(SELECT owner_id FROM public.rush_tenants WHERE slug=?)",first.slug());
-        previews.prune();
-        assertThat(db.queryForObject("SELECT count(*) FROM public.rush_tenants WHERE slug=?",Integer.class,first.slug())).isZero();
-        assertThat(response(owner(get("/api/auth/session"),normal),200).at("/demoPreview").asBoolean()).isFalse();
-    }
+        var normal = signup("valid-" + suffix);
+        assertThat(response(owner(get("/api/auth/session"), normal), 200).path("demoPreview").asBoolean()).isFalse();
+        mvc.perform(owner(post("/api/auth/demo"), normal)).andExpect(status().isGone());
 
-    private PreviewAccess demo(UUID key) throws Exception {
-        MvcResult result=mvc.perform(body(post("/api/auth/demo"),Map.of("sessionKey",key))).andExpect(status().isOk()).andReturn();
-        String setCookie=result.getResponse().getHeader("Set-Cookie");
-        assertThat(setCookie).contains("Secure","HttpOnly","SameSite=Strict");
-        var data=json.readTree(result.getResponse().getContentAsByteArray());
-        assertThat(data.at("/demoPreview").asBoolean()).isTrue();
-        String token=setCookie.split(";",2)[0].split("=",2)[1];
-        return new PreviewAccess(data.at("/shop/slug").asText(),new Credentials(new Cookie(OwnerAccounts.COOKIE,token),data.at("/csrfToken").asText()));
+        UUID former = UUID.randomUUID();
+        db.update("INSERT INTO public.rush_accounts(id,username,password_hash,preview_expires_at) VALUES (?,?,?,statement_timestamp()+interval '1 hour')",
+                former, "legacy-sample-" + suffix, "preview-disabled");
+        String slug = "legacy-sample-" + suffix;
+        var legacy = tenants.onboard(former, new TenantDirectory.ShopInput("Earlier sample", slug, null, null, null));
+        String token = "A".repeat(43);
+        String hash = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(token.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        db.update("INSERT INTO public.rush_web_sessions (token_hash,account_id,csrf_token,expires_at) VALUES (?,?,?,statement_timestamp()+interval '1 hour')",
+                hash, former, "legacy-test-csrf");
+        var old = new Credentials(new Cookie(OwnerAccounts.COOKIE, token), "legacy-test-csrf");
+        assertThat(response(owner(get("/api/auth/session"), old), 200).path("demoPreview").asBoolean()).isTrue();
+        assertThat(response(owner(post("/api/auth/demo"), old), 200).at("/shop/slug").asText()).isEqualTo(slug);
+        mvc.perform(get("/api/storefront/" + slug)).andExpect(status().isNotFound());
+        mvc.perform(owner(post("/api/owner/phone/access"), old)).andExpect(status().isForbidden());
+        db.update("UPDATE public.rush_accounts SET preview_expires_at=statement_timestamp()-interval '1 second' WHERE id=?", former);
+        mvc.perform(owner(get("/api/auth/session"), old)).andExpect(status().isUnauthorized());
+        assertThat(db.queryForObject("SELECT count(*) FROM public.rush_tenants WHERE schema_name=?", Integer.class, legacy.schema())).isEqualTo(1);
     }
-
-    private record PreviewAccess(String slug,Credentials credential) {}
 
     private void provesPooledConnectionsReset(String shop) throws Exception {
         try (var ignored = TenantContext.enter(shop); Connection scoped = routed.getConnection()) {

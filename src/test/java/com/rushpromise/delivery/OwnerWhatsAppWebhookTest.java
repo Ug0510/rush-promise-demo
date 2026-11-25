@@ -31,7 +31,7 @@ class OwnerWhatsAppWebhookTest {
     private final OwnerWhatsApp links = mock(OwnerWhatsApp.class);
     private final OwnerPhoneAccess access = mock(OwnerPhoneAccess.class);
     private final OwnerWhatsAppWebhook webhook = new OwnerWhatsAppWebhook(links,
-        new DeliverySettings("console", ACCOUNT, TOKEN, SANDBOX, "https://fixture.example", ""), access);
+        new DeliverySettings("console", ACCOUNT, TOKEN, SANDBOX, "https://fixture.example", ""), access, mock(BuyerWhatsApp.class));
 
     OwnerWhatsAppWebhookTest() {
         when(links.enabled()).thenReturn(true);

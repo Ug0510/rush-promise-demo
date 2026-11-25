@@ -14,8 +14,14 @@ The web and worker have separate deployments and private management ports. The p
 
 ## One live order
 
-Set `RUSH_PUBLIC_BASE_URL` to the approved gateway origin and `RUSH_DEPLOY_NOTIFIER=twilio` when deploying the live run. Before the operator releases an actual order, Twilio has no eligible rows. Confirm the user placed the order with the enrolled Sandbox handset and run `ops/release-live-order.sh <actual-order-number> <approval-reference>`. The order, active run and exact enrolled recipient must match. This enables the confirmation and pickup-ready notices for that one order. An old grant persists across database demo resets to keep it from authorizing a second order.
+Set `RUSH_PUBLIC_BASE_URL` to the approved gateway origin and `RUSH_DEPLOY_NOTIFIER=twilio` when deploying the legacy incident rehearsal. Confirm the user placed the order with the enrolled Sandbox handset and run `ops/release-live-order.sh <actual-order-number> <approval-reference>`. The order, active run and exact enrolled recipient must match. This enables the confirmation and pickup-ready notices for that one order. An old grant persists across database demo resets to keep it from authorizing a second order.
 
 Verify the CONFIRMED attempt and actual handset receipt before the outage. Run `ops/worker-revision.sh break`, then mark the same order packed through staff. The private web scrape continues to report the READY backlog while the worker scrape is down. The real `RushPromiseReadyNoticeBacklog` rule fires after 15 seconds and Alertmanager forwards it to the NudgeBee Cloud agent. Record the alert and the original READY message ID. After operator approval, run `ops/worker-revision.sh restore <approval-reference>`. This manual operation restores the earlier immutable config to the isolated worker deployment. Capture the original READY message’s new status and confirm the same notice once on the enrolled handset. Treat provider status and handset readback as separate evidence.
 
 Use console mode for simulated-order recordings. Avoid recording or publishing contacts, raw callback bodies, tokens or unredacted administrative screens.
+
+## Optional buyer WhatsApp
+
+Enable `RUSH_BUYER_WHATSAPP_ENABLED=true` on both the web and worker only when the Sandbox sender, credentials and status callback are configured. Set `RUSH_TWILIO_OWNER_LINK_URL` to the exact public HTTPS `/api/twilio/owner-link` webhook URL. In the authenticated Sarvam buyer flow, use `event=buyer-whatsapp` on `/api/voice/sarvam/turn` with the provider’s interaction ID, `routed=true` and `pickupMode=interaction` after the buyer chooses a shop. Ask for the buyer’s opt-in before invoking the tool. Use its reply text to explain the five-minute pairing step through the joined Sandbox conversation.
+
+Verify the spoken order and pickup code through the signed-in shop desk. A paired confirmation should queue one message containing the same code. Check the signed callback and the enrolled buyer’s handset separately. For a local test, use a synthetic buyer, a locally signed inbound request and the fake Twilio endpoint.

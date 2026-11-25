@@ -25,7 +25,6 @@ import java.util.UUID;
 class OwnerAccounts {
     static final String COOKIE = "rush_owner";
     static final Duration SESSION_TTL = Duration.ofHours(8);
-    static final Duration PREVIEW_TTL = Duration.ofHours(2);
     private static final int ITERATIONS = 600_000;
     private static final Base64.Encoder ENCODE = Base64.getUrlEncoder().withoutPadding();
     private static final Base64.Decoder DECODE = Base64.getUrlDecoder();
@@ -96,36 +95,11 @@ class OwnerAccounts {
     }
 
     private Grant grant(UUID id, String username) {
-        return grant(id,username,false);
-    }
-
-    Grant grantPreview(UUID id) { return grant(id,"Demo owner",true); }
-
-    private Grant grant(UUID id, String username, boolean preview) {
         String token = randomToken(32);
         String csrf = randomToken(24);
         db.update("INSERT INTO public.rush_web_sessions (token_hash,account_id,csrf_token,expires_at) VALUES (?,?,?,statement_timestamp()+make_interval(secs => ?))",
-                tokenHash(token), id, csrf, (preview ? PREVIEW_TTL : SESSION_TTL).toSeconds());
-        return new Grant(token, new Principal(id, username, csrf, tenants.forOwner(id),preview));
-    }
-
-    @Transactional
-    public UUID reservePreview(UUID key) {
-        if (key == null || key.version() != 4) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Start again from the demo button");
-        db.execute("SELECT pg_advisory_xact_lock(24938440)");
-        String hash = tokenHash(key.toString());
-        var previous = db.query("SELECT id FROM public.rush_accounts WHERE preview_key_hash=? AND preview_expires_at>statement_timestamp()",
-                (row,index)->row.getObject(1,UUID.class),hash).stream().findFirst().orElse(null);
-        if (previous != null) return previous;
-        Integer active = db.queryForObject("SELECT count(*) FROM public.rush_accounts WHERE preview_expires_at IS NOT NULL",Integer.class);
-        if (active != null && active >= 12) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Demo shops are busy. Try again in a few minutes.");
-        db.update("UPDATE public.rush_accounts SET preview_key_hash=NULL WHERE preview_key_hash=? AND preview_expires_at<=statement_timestamp()",hash);
-        UUID id = UUID.randomUUID();
-        db.update("""
-                INSERT INTO public.rush_accounts(id,username,password_hash,preview_key_hash,preview_expires_at)
-                VALUES (?,?,'preview-disabled',?,statement_timestamp()+make_interval(secs=>?))
-                """,id,"preview-"+id.toString().replace("-",""),hash,PREVIEW_TTL.toSeconds());
-        return id;
+                tokenHash(token), id, csrf, SESSION_TTL.toSeconds());
+        return new Grant(token, new Principal(id, username, csrf, tenants.forOwner(id),false));
     }
 
     UUID ensureDemoAccount(Credentials input) {

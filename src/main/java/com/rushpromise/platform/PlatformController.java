@@ -35,13 +35,12 @@ class PlatformController {
     private final BookingService bookings;
     private final TenantInventory inventory;
     private final OwnerPhoneAccess ownerPhone;
-    private final DemoPreviews previews;
     private final boolean signupEnabled;
     private final String publicPhone;
     private final boolean voiceAvailable;
 
     PlatformController(OwnerAccounts accounts, TenantDirectory tenants, BookingService bookings, TenantInventory inventory,
-                       OwnerPhoneAccess ownerPhone, DemoPreviews previews,
+                       OwnerPhoneAccess ownerPhone,
                        @Value("${RUSH_SIGNUP_ENABLED:true}") boolean signupEnabled,
                        @Value("${RUSH_PUBLIC_PHONE:}") String publicPhone,
                        @Value("${RUSH_PUBLIC_VOICE_AVAILABLE:true}") boolean voiceAvailable) {
@@ -50,7 +49,6 @@ class PlatformController {
         this.bookings = bookings;
         this.inventory = inventory;
         this.ownerPhone = ownerPhone;
-        this.previews = previews;
         this.signupEnabled = signupEnabled;
         if (!publicPhone.isBlank() && !publicPhone.matches("\\+[1-9][0-9]{7,14}")) {
             throw new IllegalArgumentException("RUSH_PUBLIC_PHONE must be an E.164 number");
@@ -73,18 +71,15 @@ class PlatformController {
     }
 
     @PostMapping("/api/auth/demo")
-    ResponseEntity<OwnerAccounts.SessionView> demo(@RequestBody DemoRequest input, HttpServletRequest request) {
+    ResponseEntity<OwnerAccounts.SessionView> demo(HttpServletRequest request) {
         requireSameOrigin(request);
         var current=principal(request);
-        if (current!=null) {
-            if (current.demoPreview() && current.shop()!=null) return ResponseEntity.ok(current.view());
-            throw new ResponseStatusException(HttpStatus.CONFLICT,"Sign out of your shop before opening a separate demo");
-        }
-        return setSession(previews.open(input.sessionKey()),request,HttpStatus.OK);
+        if (current!=null && current.demoPreview() && current.shop()!=null) return ResponseEntity.ok(current.view());
+        throw new ResponseStatusException(HttpStatus.GONE,"Open an existing shop from the owner page to see its public menu");
     }
 
     @GetMapping("/api/auth/options")
-    Map<String, Boolean> options() { return Map.of("signupEnabled", signupEnabled, "demoAvailable", true); }
+    AuthOptions options() { return new AuthOptions(signupEnabled, false, tenants.demoShops()); }
 
     @GetMapping("/api/public/shops")
     TenantDirectory.DirectoryView directory(@RequestParam(required = false) String query) { return tenants.storefrontDirectory(query); }
@@ -184,8 +179,7 @@ class PlatformController {
 
     private ResponseEntity<OwnerAccounts.SessionView> setSession(OwnerAccounts.Grant grant, HttpServletRequest request, HttpStatus status) {
         accounts.revoke(cookie(request));
-        Duration duration=grant.principal().demoPreview()?OwnerAccounts.PREVIEW_TTL:OwnerAccounts.SESSION_TTL;
-        return ResponseEntity.status(status).header(HttpHeaders.SET_COOKIE, sessionCookie(grant.token(), duration))
+        return ResponseEntity.status(status).header(HttpHeaders.SET_COOKIE, sessionCookie(grant.token(), OwnerAccounts.SESSION_TTL))
                 .body(grant.principal().view());
     }
 
@@ -208,7 +202,7 @@ class PlatformController {
 
     record PublicStorefront(TenantDirectory.ShopView shop, ShopMenu menu, PickupHours pickupHours, List<PickupPreview> availablePickups) {}
     record PublicSite(String phone, boolean voiceAvailable) {}
-    record DemoRequest(java.util.UUID sessionKey) {}
+    record AuthOptions(boolean signupEnabled, boolean demoAvailable, List<TenantDirectory.DemoShop> demoShops) {}
     record OnboardInput(String displayName, String slug, String area, String hours, String pickupInstructions, PickupHoursInput pickupHours) {}
     record SettingsInput(String displayName, String area, String hours, String pickupInstructions, PickupHoursInput pickupHours) {}
     record SettingsView(TenantDirectory.ShopView shop, PickupHours pickupHours) {}

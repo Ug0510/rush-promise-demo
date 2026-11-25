@@ -2,9 +2,9 @@
 
 Rush Promise helps independent shops take orders and reserve pickup times. Buyers can enter an order, review the price and pickup time, and confirm. The shop reserves the stock and pickup place together. Buyers pay cash at pickup. [Open the live demo](https://rush-promise.udit-gupta.com/)
 
-Choose **Try demo shop** to open Deepak’s private sample workspace without signing up. Edit sample stock, prices and pickup hours without affecting a live shop. [Try Deepak’s demo](https://rush-promise.udit-gupta.com/owner#signup)
+Choose Deepak Mithai Bhandar or Viraj’s Bakery to open an existing shop’s read-only demo desk. Browse its public menu, prices and pickup hours without signing up. Owners can sign in with their existing username and password. [Explore the demo shops](https://rush-promise.udit-gupta.com/owner)
 
-When the phone provider is available, buyers can call the shared line to order from a chosen shop. Owners can use a separate one-time code to hear and update their own inventory. Typed guest checkout works without speech-provider credits.
+When the phone provider is available, buyers can call the shared line to order from a chosen shop and optionally link WhatsApp to receive the pickup code. Owners can use a separate one-time code to hear and update their own inventory. Typed guest checkout works without speech-provider credits.
 
 ## Run it locally
 
@@ -40,7 +40,7 @@ Reuse an existing PostgreSQL 16 instance by setting the three `SPRING_DATASOURCE
 
 Open `/owner`, create an owner login, and choose a shop name and link. A new shop starts with an empty catalog. Add an item with a price in rupees per kilogram or per piece and record the quantity physically set aside. In shop settings, choose all-day pickup or an opening and closing time. One save keeps the shop profile and hours together. Deepak Mithai Bhandar and Viraj’s Bakery start at 9:00 AM–9:00 PM IST. An owner’s saved hours survive restart.
 
-**Try demo shop** opens a separate two-hour workspace with editable sample inventory and pickup hours. The demo has its own limit, stays outside customer search and phone routing, and has no live orders or contact settings. Open a normal owner account when you are ready to list a shop publicly.
+The demo desk shows the selected existing shop’s public menu, prices and pickup hours. Sign in with its existing owner account to manage inventory, orders and phone settings. Choose **Create an account** to start your own shop.
 
 Use `/caller?shop=<slug>` to open a buyer page. The public `GET /api/storefront/<slug>` shows the named shop and its menu with example prices and eligible times for available stock and weighed future trays. The shop link does not change the account scope for owner actions. Owners have separate products, stock, orders, voice turns and notification jobs. Owner cookies expire and a sign-out revokes the server session. Private edits require the session's CSRF token.
 
@@ -98,7 +98,7 @@ Load live credentials from an environment or secret manager. For the hosted demo
 |---|---|
 | **Sarvam AI** | `SARVAM_API_KEY`. `/caller` sends multipart audio to `POST /api/voice/browser/turn`. Saaras v4 transcribes the input and Bulbul v4 Flash speaks the reply. `RUSH_DEMO_HANDSET` restricts the hosted browser to the enrolled stage number when set. |
 | **Flagsmith** | `FLAGSMITH_ENVIRONMENT_KEY`; optional `FLAGSMITH_API_URL` for the legacy self-hosted switch. The hosted Development switch belongs to the platform operator. Merchant owners see policy facts for their own orders. The optional `RUSH_SLOT_POLICY_ENABLED=true` mode evaluates `promise_profile` against one captured Development document and actual pickup occupancy. Quote and order history show the selected rule, evidence source, digest and the slot's use before the booking. |
-| **Twilio WhatsApp Sandbox** | Keep `NOTIFIER=console` for local simulations. The isolated live worker uses `NOTIFIER=twilio` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_MSG_FROM`, `RUSH_PUBLIC_BASE_URL`, and the enrolled `RUSH_DEMO_HANDSET`. The signed status endpoint is `POST /webhooks/twilio/status`. Follow the one-order release procedure in [ops/README.md](ops/README.md). |
+| **Twilio WhatsApp Sandbox** | Keep `NOTIFIER=console` for local simulations. The isolated live worker uses `NOTIFIER=twilio` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_MSG_FROM`, `RUSH_PUBLIC_BASE_URL`, and the enrolled `RUSH_DEMO_HANDSET`. The signed status endpoint is `POST /webhooks/twilio/status`. The optional native buyer flow uses `RUSH_BUYER_WHATSAPP_ENABLED=true` on the web and worker, and `RUSH_TWILIO_OWNER_LINK_URL` for the signed inbound Sandbox webhook. Follow the deployment and live test procedures in [ops/README.md](ops/README.md). |
 | **NudgeBee** | The cluster agent relays the Prometheus/Alertmanager queue signal. See [ops/README.md](ops/README.md) for the isolated worker outage, approval reference and recovery commands. |
 | **Sarvam phone tool** | `RUSH_SARVAM_TOOL_TOKEN` for the bearer-protected `POST /api/voice/sarvam/turn`. The hosted phone agent binds each interaction to one merchant and calls the same booking engine. The browser microphone route works independently. |
 
@@ -120,7 +120,9 @@ The buyer uses `/caller?shop=<slug>` on the approved HTTPS origin. The public on
 
 Open the two buyer pages and the corresponding private owner desks. Deepak prices barfi and kaju katli by weight. Viraj prices cupcakes and brownies by piece. Ask for an item, quantity and time. The assistant can give a price and eligible half-hour pickup options before creating a booking. After a correction, listen for the updated amount, local date and slot, then confirm that offer. Compare the saved customer pickup and the private desk. To demonstrate an hours edit, use one store’s settings and check both storefronts afterward.
 
-When the provider binds the call and supplies a stable caller identity, the assistant can use ordinary stock, slot and approval rules without storing a phone number. The call-only path saves one ordinary pickup per authenticated interaction. A pickup that needs approval calls for a suitable later slot or shop assistance. If the provider cannot return the current quote receipt with an explicit yes, the assistant repeats the current terms with a short confirmation number tied to that offer. Saying yes with that number can then book the offer. The saved order has a separate pickup code, which also appears in the signed-in shop’s desk. Pickup-code orders do not queue a buyer message.
+When the provider binds the call and supplies a stable caller identity, the assistant can use ordinary stock, slot and approval rules without storing a phone number. The call-only path saves one ordinary pickup per authenticated interaction. A pickup that needs approval calls for a suitable later slot or shop assistance. If the provider cannot return the current quote receipt with an explicit yes, the assistant repeats the current terms with a short confirmation number tied to that offer. Saying yes with that number can then book the offer. The saved order has a separate pickup code, which also appears in the signed-in shop’s desk.
+
+When buyer WhatsApp is enabled, the caller can ask for a confirmation during the call. They send `PICKUP <pairing code>` to the number they joined on the Twilio Sandbox within five minutes, during the call or shortly after. The signed inbound message links that sender to this call. Once the call has both a confirmed booking and a linked sender, Rush Promise queues one WhatsApp with the same pickup code the assistant speaks. `STOP` withdraws consent for pending notices.
 
 On 25 November 2026 at 16:05–16:06 IST, a real inbound customer handset call booked exactly one Deepak pickup after explicit assent. Order `4823` was 500 g of barfi for ₹450 cash at 18:00 IST. The assistant spoke the order number and pickup code. This was separate from browser order `4822`, whose confirmation and ready notices reached the enrolled WhatsApp handset. Owner inventory operations were verified through authenticated HTTPS rehearsal. A real owner handset call remains unverified.
 

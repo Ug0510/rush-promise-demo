@@ -25,11 +25,13 @@ class TwilioStatusController {
     private final DeliverySettings settings;
     private final OutboxRepository outbox;
     private final OwnerWhatsApp owners;
+    private final BuyerWhatsApp buyers;
 
-    TwilioStatusController(DeliverySettings settings, OutboxRepository outbox, OwnerWhatsApp owners) {
+    TwilioStatusController(DeliverySettings settings, OutboxRepository outbox, OwnerWhatsApp owners, BuyerWhatsApp buyers) {
         this.settings = settings;
         this.outbox = outbox;
         this.owners = owners;
+        this.buyers = buyers;
     }
 
     @PostMapping(path = "/webhooks/twilio/status", consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
@@ -59,7 +61,7 @@ class TwilioStatusController {
         String code = read(form, "ErrorCode");
         String error = code != null && code.matches("\\d{3,8}") ? "TWILIO_ERROR_" + code : null;
         DeliveryResult update = DeliveryResult.providerStatus(messageStatus, sid, error);
-        if (update != null && !owners.observe(attempt, update)) {
+        if (update != null && !owners.observe(attempt, update) && !buyers.observe(attempt, update)) {
             outbox.observe(attempt, update);
         }
     }

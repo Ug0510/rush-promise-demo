@@ -72,7 +72,7 @@ class TwilioWhatsAppTest {
         params.forEach(request::setParameter);
         request.setParameter("attempt",ATTEMPT.toString());
         var outbox = mock(OutboxRepository.class);
-        var controller = new TwilioStatusController(settings, outbox, org.mockito.Mockito.mock(OwnerWhatsApp.class));
+        var controller = new TwilioStatusController(settings, outbox, mock(OwnerWhatsApp.class), mock(BuyerWhatsApp.class));
         assertThrows(org.springframework.web.server.ResponseStatusException.class,() -> controller.status(request));
         verifyNoInteractions(outbox);
         request.addHeader("X-Twilio-Signature",signature);

@@ -57,6 +57,17 @@ public class TenantDirectory {
                 .toList();
     }
 
+    List<DemoShop> demoShops() {
+        return db.query("""
+                SELECT t.slug,t.display_name,a.username FROM public.rush_tenants t
+                JOIN public.rush_accounts a ON a.id=t.owner_id
+                WHERE t.state='ACTIVE' AND t.demo_fixture AND a.preview_expires_at IS NULL
+                  AND ((t.slug='deepak-mithai-bhandar' AND a.username='deepak-owner')
+                    OR (t.slug='virajs-bakery' AND a.username='viraj-owner'))
+                ORDER BY t.slug
+                """, (row,index)->new DemoShop(row.getString(1),row.getString(2),row.getString(3)));
+    }
+
     private List<PublicShop> publicShops() {
         return db.query("""
                 SELECT slug,display_name,area FROM public.rush_tenants WHERE state='ACTIVE'
@@ -193,4 +204,5 @@ public class TenantDirectory {
     public record ShopView(String slug, String displayName, String area, String hours, String pickupInstructions, boolean demoFixture) {}
     public record PublicShop(String slug, String displayName, String area) {}
     public record DirectoryView(List<PublicShop> shops, boolean truncated) {}
+    public record DemoShop(String slug, String displayName, String username) {}
 }
