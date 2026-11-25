@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1424">
+  <title>Pickup desk · Rush Promise</title>
+  <link rel="stylesheet" href="/voice-ui/caller.css">
+  <link rel="stylesheet" href="/staff-ui/staff.css">
+  <script defer src="/staff-ui/staff.js"></script>
+</head>
+<body>
+  <div class="desk">
+    <header class="desk-top">
+      <div class="desk-heading"><span class="brand"><span class="brand-mark" aria-hidden="true">❯❯</span>Rush Promise</span><h1>Pickup desk</h1></div>
+      <div id="desk-tools" class="desk-tools" hidden>
+        <div class="policy-readback"><p id="policy-status" class="policy-status"></p><small id="policy-summary"></small></div>
+        <a id="flagsmith" class="desk-link" href="https://app.flagsmith.com/" target="_blank" rel="noopener noreferrer" hidden>Edit in Flagsmith ↗</a>
+        <button id="refresh" type="button" class="button quiet icon-button" aria-label="Refresh pickup desk" title="Refresh pickup desk">↻</button>
+        <button id="logout" type="button" class="button quiet">Lock desk</button>
+      </div>
+    </header>
+
+    <form id="staff-login" class="sign-in">
+      <h2>Unlock pickup desk</h2>
+      <p>Use your staff or owner access token.</p>
+      <label>Access token <input id="staff-token" type="password" required autocomplete="off" spellcheck="false"></label>
+      <button class="button primary" type="submit">Unlock desk</button>
+      <p id="login-error" class="desk-error" role="alert" hidden></p>
+    </form>
+
+    <main id="workspace" hidden>
+      <p id="connection" class="connection" role="status" hidden></p>
+      <dl class="overview">
+        <div><dt>Next pickup</dt><dd id="next-pickup">—</dd></div>
+        <div><dt>Phone tray</dt><dd id="tray-stock">—</dd></div>
+        <div><dt>Owner decision</dt><dd id="pending-count">—</dd></div>
+      </dl>
+      <div class="desk-columns">
+        <section class="up-next" aria-labelledby="up-next-title">
+          <div class="section-title"><h2 id="up-next-title">Up next</h2><p id="shop-clock"></p></div>
+          <div id="spotlight"></div>
+          <div id="queue" class="queue"></div>
+        </section>
+        <aside class="decisions" aria-labelledby="decisions-title">
+          <h2 id="decisions-title">Needs approval</h2>
+          <div id="approvals"></div>
+          <section class="inventory" aria-labelledby="inventory-title">
+            <h3 id="inventory-title">Phone tray</h3>
+            <div id="batches"></div>
+          </section>
+        </aside>
+      </div>
+      <section class="recent" aria-labelledby="recent-title">
+        <div class="section-title"><h2 id="recent-title">Recent orders</h2><span id="staff-role" class="muted"></span></div>
+        <div id="recent"></div>
+      </section>
+      <p id="desk-error" class="desk-error" role="alert" hidden></p>
+    </main>
+  </div>
+</body>
+</html>

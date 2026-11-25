@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-preflight
+  namespace: telemetry-preflight
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager.telemetry-preflight.svc.cluster.local:9093']
+    rule_files: ['/etc/preflight/rules.yml']
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']
+      - job_name: rush-promise-web
+        metrics_path: /actuator/prometheus
+        static_configs:
+          - targets: ['rush-promise-web.dev-data.svc.cluster.local:8081']
+      - job_name: rush-promise-worker
+        metrics_path: /actuator/prometheus
+        static_configs:
+          - targets: ['rush-promise-worker-metrics.dev-data.svc.cluster.local:8081']
+  rules.yml: |
+    groups:
+      - name: rush-promise-delivery
+        rules:
+          - alert: RushPromiseReadyNoticeBacklog
+            expr: |
+              max(rush_ready_messages_pending{job="rush-promise-web"}) > 0
+              and max(up{job="rush-promise-worker"}) == 0
+            for: 15s
+            labels:
+              severity: warning
+              scope: rush-promise-demo
+            annotations:
+              summary: A pickup-ready notice is waiting while the worker is unavailable
+              description: Inspect the demo worker revision and pending READY queue. Restore only with operator approval.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-preflight
+  namespace: telemetry-preflight
+data:
+  alertmanager.yml: |
+    route:
+      receiver: discard
+      group_by: ['alertname', 'scope']
+      group_wait: 2s
+      group_interval: 5s
+      repeat_interval: 15m
+      routes:
+        - matchers: ['scope="rush-promise-demo"']
+          receiver: nudgebee
+    receivers:
+      - name: discard
+      - name: nudgebee
+        webhook_configs:
+          - url: http://nudgebee-agent-runner.nudgebee-agent.svc.cluster.local/api/alerts
+            send_resolved: true

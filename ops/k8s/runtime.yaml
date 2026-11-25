@@ -1,0 +1,193 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rush-promise-runtime
+  namespace: dev-data
+data:
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgres.dev-data.svc.cluster.local:5432/shop
+  SPRING_DATASOURCE_USERNAME: shop_app
+  MANAGEMENT_SERVER_PORT: "8081"
+  MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,prometheus
+  MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+  MANAGEMENT_ENDPOINT_HEALTH_GROUP_READINESS_INCLUDE: readinessState,db
+  TWILIO_MSG_FROM: whatsapp:+14155238886
+  RUSH_PUBLIC_BASE_URL: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rush-worker-config-v1
+  namespace: dev-data
+immutable: true
+data:
+  boot: ready
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rush-worker-config-v2-blocked
+  namespace: dev-data
+immutable: true
+data:
+  boot: blocked
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rush-promise-web
+  namespace: dev-data
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: rush-promise-web}
+  template:
+    metadata:
+      labels: {app: rush-promise-web}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: web
+          image: rush-promise:dev
+          imagePullPolicy: Never
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: management, containerPort: 8081}
+          envFrom:
+            - configMapRef: {name: rush-promise-runtime}
+          env:
+            - {name: SPRING_PROFILES_ACTIVE, value: demo}
+            - {name: DEMO_DATE, value: "2026-11-25"}
+            - {name: JAVA_TOOL_OPTIONS, value: "-XX:MaxRAMPercentage=70"}
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: {secretKeyRef: {name: shop-db-auth, key: password}}
+            - name: SARVAM_API_KEY
+              valueFrom: {secretKeyRef: {name: shop-provider-auth, key: SARVAM_API_KEY}}
+            - name: FLAGSMITH_ENVIRONMENT_KEY
+              valueFrom: {secretKeyRef: {name: shop-provider-auth, key: FLAGSMITH_SERVER_KEY}}
+            - name: FLAGSMITH_API_URL
+              valueFrom: {secretKeyRef: {name: shop-provider-auth, key: FLAGSMITH_API_URL}}
+            - name: TWILIO_ACCOUNT_SID
+              valueFrom: {secretKeyRef: {name: shop-provider-auth, key: TWILIO_ACCOUNT_SID}}
+            - name: TWILIO_AUTH_TOKEN
+              valueFrom: {secretKeyRef: {name: shop-provider-auth, key: TWILIO_AUTH_TOKEN}}
+            - name: RUSH_DEMO_HANDSET
+              valueFrom: {secretKeyRef: {name: rush-live-demo, key: enrolled-recipient, optional: true}}
+            - name: RUSH_STAFF_TOKEN
+              valueFrom: {secretKeyRef: {name: rush-live-demo, key: staff-token}}
+            - name: RUSH_OWNER_TOKEN
+              valueFrom: {secretKeyRef: {name: rush-live-demo, key: owner-token, optional: true}}
+            - name: RUSH_OPERATOR_TOKEN
+              valueFrom: {secretKeyRef: {name: rush-live-demo, key: operator-token, optional: true}}
+            - name: RUSH_BOOKING_API_TOKEN
+              valueFrom: {secretKeyRef: {name: rush-live-demo, key: booking-token}}
+            - name: RUSH_SARVAM_TOOL_TOKEN
+              valueFrom: {secretKeyRef: {name: rush-live-demo, key: sarvam-webhook-token, optional: true}}
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: management}
+            periodSeconds: 3
+          startupProbe:
+            httpGet: {path: /actuator/health/readiness, port: management}
+            periodSeconds: 3
+            failureThreshold: 30
+          resources:
+            requests: {cpu: 50m, memory: 192Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rush-promise-web
+  namespace: dev-data
+spec:
+  selector: {app: rush-promise-web}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+    - {name: management, port: 8081, targetPort: management}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rush-promise-worker
+  namespace: dev-data
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: rush-promise-worker}
+  template:
+    metadata:
+      labels: {app: rush-promise-worker}
+      annotations:
+        rush-promise.io/worker-config: rush-worker-config-v1
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: worker
+          image: rush-promise:dev
+          imagePullPolicy: Never
+          ports:
+            - {name: management, containerPort: 8081}
+          envFrom:
+            - configMapRef: {name: rush-promise-runtime}
+          env:
+            - {name: SPRING_PROFILES_ACTIVE, value: worker}
+            - {name: NOTIFIER, value: console}
+            - {name: JAVA_TOOL_OPTIONS, value: "-XX:MaxRAMPercentage=70"}
+            - name: RUSH_WORKER_BOOT
+              valueFrom: {configMapKeyRef: {name: rush-worker-config-v1, key: boot}}
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: {secretKeyRef: {name: shop-db-auth, key: password}}
+            - name: TWILIO_ACCOUNT_SID
+              valueFrom: {secretKeyRef: {name: shop-provider-auth, key: TWILIO_ACCOUNT_SID}}
+            - name: TWILIO_AUTH_TOKEN
+              valueFrom: {secretKeyRef: {name: shop-provider-auth, key: TWILIO_AUTH_TOKEN}}
+            - name: RUSH_DEMO_HANDSET
+              valueFrom: {secretKeyRef: {name: rush-live-demo, key: enrolled-recipient, optional: true}}
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: management}
+            periodSeconds: 3
+          startupProbe:
+            httpGet: {path: /actuator/health/readiness, port: management}
+            periodSeconds: 3
+            failureThreshold: 30
+          resources:
+            requests: {cpu: 50m, memory: 192Mi}
+            limits: {cpu: "1", memory: 384Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rush-promise-worker-metrics
+  namespace: dev-data
+spec:
+  selector: {app: rush-promise-worker}
+  ports:
+    - {name: management, port: 8081, targetPort: management}

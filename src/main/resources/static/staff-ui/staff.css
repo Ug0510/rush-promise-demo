@@ -1,0 +1,79 @@
+.desk { min-height: 100dvh; margin: auto; max-width: 1420px; padding: 0 clamp(1rem, 4.2vw, 3.6rem) 3rem; }
+.desk-top { min-height: 82px; display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; padding: 1rem 0; }
+.desk-heading, .desk-tools { display: flex; align-items: center; gap: clamp(.7rem, 2.4vw, 1.8rem); flex-wrap: wrap; }
+.desk-heading .brand { font-size: clamp(1.25rem, 2.6vw, 1.8rem); }
+.desk-heading h1 { font-size: clamp(1.45rem, 3vw, 2.15rem); line-height: 1.12; letter-spacing: -.055em; padding-left: clamp(.7rem, 2.4vw, 1.8rem); border-left: 1px solid var(--line); }
+.desk-tools { gap: .6rem; }
+.desk-tools .button { min-height: 38px; padding: .35rem .62rem; }
+.icon-button { min-width: 38px; font-size: 1.27rem; }
+.policy-readback { display: grid; justify-items: start; gap: .27rem; }
+.policy-readback small { color: var(--muted); font-size: .72rem; }
+.policy-status { padding: .42rem .66rem; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; font-size: .83rem; font-weight: 650; }
+.policy-status[data-rush="true"] { color: var(--teal); background: #133a43; border-color: #2c7682; }
+.desk-link { color: var(--teal); font-size: .85rem; text-underline-offset: 3px; }
+.sign-in { width: min(100%, 420px); margin: clamp(2.3rem, 12vh, 7rem) auto; padding: clamp(1rem, 5vw, 1.8rem); border: 1px solid var(--line); border-radius: .9rem; background: var(--well); display: grid; gap: .9rem; }
+.sign-in h2 { font-size: 1.85rem; letter-spacing: -.055em; }
+.sign-in p, .sign-in label { color: var(--muted); }
+.sign-in label input { margin-top: .36rem; }
+.overview { min-height: 68px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; background: var(--well); border-radius: .75rem; padding: .65rem 0; }
+.overview > div { min-width: 0; display: flex; align-items: center; justify-content: center; gap: clamp(.5rem, 2vw, 1.4rem); padding: .45rem .6rem; }
+.overview > div + div { border-left: 1px solid var(--line); }
+.overview dt { color: var(--muted); font-size: clamp(.72rem, 1.4vw, .99rem); }
+.overview dd { margin: 0; font-size: clamp(1.03rem, 2vw, 1.4rem); font-weight: 770; }
+.overview dd[data-warning="true"] { color: var(--coral); }
+.desk-columns { display: grid; grid-template-columns: minmax(0, 1.72fr) minmax(280px, 1fr); align-items: start; gap: 1rem; margin-top: 1rem; }
+.up-next, .decisions { min-width: 0; background: #0e192c; border: 1px solid #142239; border-radius: .9rem; padding: clamp(.9rem, 2.4vw, 1.55rem); }
+.section-title { display: flex; justify-content: space-between; gap: .8rem; align-items: baseline; flex-wrap: wrap; }
+.section-title h2, .decisions h2 { font-size: clamp(1.42rem, 3vw, 2rem); line-height: 1.06; letter-spacing: -.055em; }
+.section-title p, .muted { color: var(--muted); font-size: .84rem; }
+.spotlight { margin-top: .9rem; padding: clamp(.95rem, 3vw, 1.6rem); border: 1px solid var(--line); border-radius: .72rem; background: #0e1a2c; }
+.spotlight.has-kaju { position: relative; z-index: 0; isolation: isolate; }
+.spotlight.has-kaju::before {
+  content: ""; position: absolute; z-index: -1; right: .48rem; top: 1rem; bottom: 3.85rem; width: min(58%, 420px);
+  background: linear-gradient(90deg, #0e1a2c 0%, transparent 33%), linear-gradient(0deg, #0e1a2c 2%, transparent 42%),
+    url("/staff-ui/kaju-katli.webp") center 61% / cover no-repeat;
+  border-radius: .52rem; pointer-events: none;
+}
+.spotlight span:first-child { color: var(--muted); font-size: 1.1rem; font-weight: 700; }
+.spotlight time { display: block; font-size: clamp(4rem, 9vw, 7rem); line-height: .9; font-weight: 840; margin: .48rem 0 .7rem; letter-spacing: -.09em; font-variant-numeric: tabular-nums; }
+.spotlight h3 { font-size: clamp(1.15rem, 2.5vw, 1.8rem); letter-spacing: -.035em; }
+.spotlight .price { margin: .27rem 0 .68rem; font-size: 1.2rem; font-weight: 700; }
+.spotlight .primary { width: 100%; margin-top: 1rem; min-height: 56px; font-size: 1.16rem; }
+.spotlight .delivery { margin-top: .75rem; }
+.status { display: inline-block; align-self: start; background: #153442; color: var(--teal); border-radius: 999px; padding: .36rem .61rem; font-size: .8rem; font-weight: 700; }
+.status[data-state="AWAITING_APPROVAL"] { background: #452e35; color: var(--coral); }
+.status[data-state="CANCELLED"], .status[data-state="SHORT"], .status[data-state="EXPIRED"] { background: #2a3042; color: #d6dfff; }
+.empty { color: var(--muted); margin-top: 1rem; line-height: 1.44; }
+.queue { margin-top: .65rem; }
+.order-row { display: grid; grid-template-columns: 1fr max-content; gap: .5rem 1rem; padding: .82rem 0; align-items: center; border-bottom: 1px solid var(--line); }
+.order-row:last-child { border-bottom: 0; }
+.order-row h3 { font-size: 1.02rem; }
+.order-row p { margin-top: .23rem; }
+.order-row .actions { display: flex; gap: .3rem; flex-wrap: wrap; justify-content: flex-end; }
+.order-row .actions .button { min-height: 36px; padding: .3rem .55rem; font-size: .8rem; }
+.approval-row { border: 1px solid var(--line); border-left: 4px solid var(--coral); border-radius: .57rem; margin-top: .83rem; padding: .65rem .67rem; }
+.approval-row .button:first-child { color: #251017; background: var(--coral); border-color: var(--coral); }
+.delivery { font-size: .84rem; color: #c9d8eb; }
+.delivery[data-state="pending"] { color: var(--amber); }
+.delivery[data-state="delivered"] { color: var(--teal); }
+.inventory { padding-top: .85rem; margin-top: 1rem; border-top: 1px solid var(--line); }
+.inventory h3 { font-size: .94rem; }
+.batch { color: var(--muted); display: flex; justify-content: space-between; gap: .3rem; margin-top: .58rem; font-size: .82rem; }
+.batch b { color: #e6edf8; }
+.recent { margin-top: 1rem; padding: 1rem .25rem 0; }
+.recent .section-title { margin-bottom: .45rem; }
+.connection, .desk-error { font-size: .86rem; color: #ffd4c8; background: #342330; border: 1px solid #774a55; border-radius: .57rem; padding: .62rem .7rem; margin-bottom: .65rem; }
+.desk-error { margin-top: .85rem; }
+@media (max-width: 760px) {
+  .desk-columns { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 530px), (min-width: 761px) and (max-width: 970px) {
+  .spotlight.has-kaju::before { display: none; }
+}
+@media (max-width: 430px) {
+  .desk-top { gap: .65rem; }
+  .overview > div { display: grid; justify-content: start; gap: .24rem; padding: .37rem .48rem; }
+  .overview dt { line-height: 1.2; }
+  .order-row { grid-template-columns: 1fr; }
+  .order-row .actions { justify-content: flex-start; }
+}

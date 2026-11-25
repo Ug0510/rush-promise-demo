@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1424">
+  <title>Speak your order · Rush Promise</title>
+  <link rel="stylesheet" href="/voice-ui/caller.css">
+  <script defer src="/voice-ui/caller.js"></script>
+</head>
+<body>
+  <main class="caller">
+    <header class="brand"><span class="brand-mark" aria-hidden="true">❯❯</span>Rush Promise</header>
+    <section class="caller-title">
+      <h1>Speak your order</h1>
+      <p id="intro">Say what you’d like, how much, and when you’ll pick it up.</p>
+    </section>
+    <div class="voice-wave" data-phase="idle" aria-hidden="true">
+      <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      <span class="mic-disc"><span class="mic-shape"></span></span>
+    </div>
+    <p id="mic-state" class="mic-state" role="status">Microphone off</p>
+
+    <form id="caller-form" class="contact" autocomplete="on">
+      <label>Pickup name <input id="customer" name="name" autocomplete="name" maxlength="100" required></label>
+      <label>Mobile number <input id="phone" name="tel" autocomplete="tel" type="tel" inputmode="tel" maxlength="22" required></label>
+    </form>
+
+    <section class="turn" aria-live="polite" aria-atomic="true">
+      <p id="heard" class="transcript" hidden><span>I heard</span><b id="transcript" dir="auto"></b></p>
+      <dl id="details" class="details" hidden>
+        <div><dt>Order</dt><dd id="item"></dd></div>
+        <div><dt>Pickup</dt><dd id="pickup"></dd></div>
+        <div><dt>Amount</dt><dd id="amount"></dd></div>
+      </dl>
+      <p id="reply" class="reply" hidden></p>
+    </section>
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <div class="caller-actions">
+      <button id="speak" class="button primary" form="caller-form" type="submit">Start speaking</button>
+      <button id="replay" class="button quiet" type="button" hidden>↻ <span>Replay</span></button>
+      <button id="retry" class="button quiet" type="button" hidden>Retry this turn</button>
+      <button id="restart" class="button quiet" type="button" hidden>Start a new order</button>
+    </div>
+    <audio id="readback" preload="none"></audio>
+  </main>
+</body>
+</html>
