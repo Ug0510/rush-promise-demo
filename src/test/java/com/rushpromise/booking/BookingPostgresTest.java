@@ -17,6 +17,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -38,6 +39,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntFunction;
 import java.util.stream.IntStream;
 
@@ -156,6 +158,22 @@ class BookingPostgresTest {
             assertThat(amount("A")).isZero();
             assertThat(used("18:30")).isEqualTo(1);
         }
+    }
+
+    @Test
+    void c05SequentialLastSlotConflictKeepsTheWaitingBuyersStockFree() {
+        db.update("UPDATE batches SET phone_grams_free=1000, phone_grams_total=1000 WHERE id='A'");
+        var lata = quote(1, "kaju-katli", 500, "18:30");
+        var earlier = accept(quote(2, "barfi", 1000, "18:30"));
+        assertThat(earlier.status()).isEqualTo(201);
+        var later = accept(lata);
+        assertThat(later.status()).isEqualTo(409);
+        assertThat(later.reason()).isEqualTo("SLOT_FULL");
+        assertThat(later.quote().pickupTime()).isEqualTo("19:00");
+        assertThat(amount("A")).isEqualTo(1000);
+        assertThat(used("18:30")).isEqualTo(1);
+        assertThat(shop.orders()).containsExactly(earlier.order());
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isEqualTo(1);
     }
 
     @Test
@@ -320,6 +338,93 @@ class BookingPostgresTest {
         assertThat(cold.current().source()).isEqualTo("FALLBACK");
         assertThat(cold.current().rushMode()).isTrue();
     }
+
+    @Test
+    void hostedRevisionPreventsAStaleOffReadFromAcceptingOldBarfiTerms() throws Exception {
+        var officialEndpoint = URI.create("https://api.flagsmith.com/api/v1/flags/");
+        assertThat(PolicyService.versionedEndpoint(URI.create("https://edge.api.flagsmith.com/api/v1/flags/"))).isEqualTo(officialEndpoint);
+        assertThat(PolicyService.versionedEndpoint(URI.create("https://api.flagsmith.com/api/v1/flags/"))).isEqualTo(officialEndpoint);
+        Instant originalRevision = Instant.parse("2031-02-09T08:00:00.000001Z");
+        Instant rushRevision = originalRevision.plusSeconds(10);
+        Instant refreshedRushRevision = rushRevision.plusSeconds(5);
+        Instant intentionalOff = refreshedRushRevision.plusSeconds(5);
+        var upstream = new AtomicReference<>(new FlagFixture(false, originalRevision));
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/v1/flags/", exchange -> {
+            FlagFixture observed = upstream.get();
+            byte[] response = flagList(observed.enabled()).getBytes(StandardCharsets.UTF_8);
+            String revision = java.math.BigDecimal.valueOf(observed.revision().getEpochSecond())
+                    .add(java.math.BigDecimal.valueOf(observed.revision().getNano(), 9)).toPlainString();
+            exchange.getResponseHeaders().add("X-Flagsmith-Document-Updated-At", revision);
+            exchange.sendResponseHeaders(200, response.length);
+            try (var body = exchange.getResponseBody()) { body.write(response); }
+        });
+        server.start();
+        URI localDocument = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/api/v1/flags/");
+        try {
+            var primary = new PolicyService(json, db, "synthetic-revision-key", localDocument, 5000);
+            primary.refresh();
+            when(policy.current()).thenAnswer(ignored -> primary.current());
+            assertThat(primary.current().providerUpdatedAt()).isEqualTo(originalRevision);
+            var existing = accept(quote(1, "kaju-katli", 500, "18:30")).order();
+            var quoted = quote(2, "barfi", 4000, "20:00");
+            assertThat(quoted.requiresApproval()).isFalse();
+
+            upstream.set(new FlagFixture(true, rushRevision));
+            primary.refresh();
+            var observedOn = primary.current();
+            assertThat(observedOn.rushMode()).isTrue();
+            assertThat(observedOn.approvalAboveGrams()).isEqualTo(3000);
+            assertThat(observedOn.providerUpdatedAt()).isEqualTo(rushRevision);
+            upstream.set(new FlagFixture(false, originalRevision));
+            primary.refresh();
+            assertThat(primary.current().rushMode()).isTrue();
+            assertThat(primary.current().fetchedAt()).isEqualTo(observedOn.fetchedAt());
+            upstream.set(new FlagFixture(false, rushRevision));
+            primary.refresh();
+            assertThat(primary.current().fetchedAt()).isEqualTo(observedOn.fetchedAt());
+
+            var restarted = new PolicyService(json, db, "synthetic-revision-key", localDocument, 5000);
+            restarted.restoreOnStartup();
+            restarted.refresh();
+            assertThat(restarted.current().providerUpdatedAt()).isEqualTo(rushRevision);
+            assertThat(restarted.current().rushMode()).isTrue();
+            when(policy.current()).thenAnswer(ignored -> restarted.current());
+            var refused = accept(quoted);
+            assertThat(refused.status()).isEqualTo(409);
+            assertThat(refused.code()).isEqualTo("TERMS_CHANGED");
+            assertThat(refused.quote().requiresApproval()).isTrue();
+            assertThat(shop.orders()).containsExactly(existing);
+            assertThat(accept(quoted)).isEqualTo(refused);
+
+            upstream.set(new FlagFixture(true, refreshedRushRevision));
+            restarted.refresh();
+            var pending = accept(refused.quote()).order();
+            assertThat(pending.status()).isEqualTo("AWAITING_APPROVAL");
+            assertThat(pending.policy().providerUpdatedAt()).isEqualTo(refreshedRushRevision);
+            assertThat(shop.orders().getFirst()).isEqualTo(existing);
+            upstream.set(new FlagFixture(false, intentionalOff));
+            restarted.refresh();
+            assertThat(restarted.current().rushMode()).isFalse();
+            assertThat(restarted.current().providerUpdatedAt()).isEqualTo(intentionalOff);
+            Instant clearedFetch = restarted.current().fetchedAt();
+            upstream.set(new FlagFixture(true, refreshedRushRevision));
+            restarted.refresh();
+            assertThat(restarted.current().rushMode()).isFalse();
+            assertThat(restarted.current().fetchedAt()).isEqualTo(clearedFetch);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private static String flagList(boolean enabled) {
+        return """
+                [{"feature":{"name":"rush_mode"},"enabled":%s,"feature_segment":{"id":1}},
+                 {"feature":{"name":"rush_mode"},"enabled":%s,"feature_segment":null}]
+                """.formatted(!enabled, enabled);
+    }
+
+    private record FlagFixture(boolean enabled, Instant revision) {}
 
     @Test
     void f16F24SeparateQuoteExpiryFromLeadTime() {
@@ -531,6 +636,118 @@ class BookingPostgresTest {
         mvc.perform(get("/api/staff/session").header("X-Staff-Token", "test-role-owner"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.role").value("OWNER"));
         mvc.perform(post("/ops/demo/reset").header("X-Staff-Token", "test-role-operator")).andExpect(status().isOk());
+    }
+
+    @Test
+    void c10ProtectedSnapshotRefetchIncludesExactlyOneNewOrderAndCurrentDelivery() throws Exception {
+        mvc.perform(get("/api/events")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/staff/snapshot")).andExpect(status().isUnauthorized());
+        var staffView = "/api/staff/snapshot";
+        mvc.perform(get(staffView).header("X-Staff-Token", "test-role-staff"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.orders.length()").value(0));
+        var order = accept(quote(1, "kaju-katli", 500, "18:30")).order();
+        assertThat(shop.action(order.id(), "pack", null).status()).isEqualTo(200);
+        for (int i = 0; i < 2; i++) {
+            mvc.perform(get(staffView).header("X-Staff-Token", "test-role-staff"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.orders.length()").value(1))
+                    .andExpect(jsonPath("$.orders[0].id").value(4821))
+                    .andExpect(jsonPath("$.orders[0].status").value("PACKED"))
+                    .andExpect(jsonPath("$.stock.batches[0].phoneGramsFree").value(0))
+                    .andExpect(jsonPath("$.deliveries['4821'].length()").value(2))
+                    .andExpect(jsonPath("$.deliveries['4821'][1].kind").value("READY"))
+                    .andExpect(jsonPath("$.deliveries['4821'][1].status").value("QUEUED"));
+        }
+    }
+
+    @Test
+    void nextPickupProjectionSharesQuoteEligibilityAndWritesNothing() throws Exception {
+        var route = "/api/availability/next?sku=kaju-katli&grams=500";
+        mvc.perform(get(route)).andExpect(status().isUnauthorized());
+        mvc.perform(get(route).header("X-Staff-Token", "test-role-staff"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.option.pickupTime").value("18:00"))
+                .andExpect(jsonPath("$.option.batchId").value("A"))
+                .andExpect(jsonPath("$.option.batchFreeGrams").value(500));
+        rush();
+        Availability tooSoon = booking.nextAvailability("kaju-katli", 500, "18:00");
+        assertThat(tooSoon.reason()).isEqualTo("TOO_SOON");
+        assertThat(tooSoon.option().pickupTime()).isEqualTo("18:15");
+        db.update("UPDATE pickup_slots SET used=capacity WHERE (pickup_at AT TIME ZONE 'Asia/Kolkata')::time=TIME '18:30'");
+        Availability lastSlot = booking.nextAvailability("kaju-katli", 500, "18:30");
+        assertThat(lastSlot.reason()).isEqualTo("SLOT_FULL");
+        assertThat(lastSlot.option().pickupTime()).isEqualTo("19:00");
+        db.update("UPDATE batches SET blocked=TRUE WHERE id='A'");
+        Availability fallback = booking.nextAvailability("kaju-katli", 500, "18:30");
+        assertThat(fallback.reason()).isEqualTo("OUT_OF_STOCK");
+        assertThat(fallback.option().batchId()).isEqualTo("B");
+        assertThat(fallback.option().batchReadyTime()).isEqualTo("18:45");
+        assertThat(fallback.option().batchFreeGrams()).isEqualTo(1000);
+        assertThat(fallback.option().batchStatus()).isEqualTo("PLANNED");
+        db.update("UPDATE batches SET ready_at=ready_at+INTERVAL '5 minutes' WHERE id='B'");
+        assertThat(booking.nextAvailability("kaju-katli", 500, "18:30").option().pickupTime()).isEqualTo("19:30");
+        db.update("UPDATE batches SET blocked=TRUE WHERE id='B'");
+        var unavailable = booking.nextAvailability("kaju-katli", 500, "18:30");
+        assertThat(unavailable.option()).isNull();
+        assertThat(unavailable.reason()).isEqualTo("NONE_AVAILABLE");
+        assertThat(count("SELECT COUNT(*) FROM quotes")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM booking_sessions")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isZero();
+    }
+
+    @Test
+    void shopProfileIsOwnerOnlyAndPersistsAcrossDemoResetAndNewMessages() throws Exception {
+        String previous = shop.profile().displayName();
+        String route = "/api/shop/profile";
+        String change = "{\"displayName\":\"  अनन्या मिठाई  \"}";
+        try {
+            mvc.perform(post(route).contentType(MediaType.APPLICATION_JSON).content(change)).andExpect(status().isUnauthorized());
+            mvc.perform(post(route).header("X-Staff-Token", "test-role-staff").contentType(MediaType.APPLICATION_JSON).content(change))
+                    .andExpect(status().isForbidden());
+            mvc.perform(post(route).header("X-Staff-Token", "test-role-operator").contentType(MediaType.APPLICATION_JSON).content(change))
+                    .andExpect(status().isForbidden());
+            mvc.perform(post(route).header("X-Staff-Token", "test-role-owner").contentType(MediaType.APPLICATION_JSON).content(change))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.displayName").value("अनन्या मिठाई"));
+            mvc.perform(post(route).header("X-Staff-Token", "test-role-owner").contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"displayName\":\"  \"}"))
+                    .andExpect(status().isBadRequest());
+            assertThat(shop.reset(null).status()).isEqualTo(200);
+            assertThat(shop.profile().displayName()).isEqualTo("अनन्या मिठाई");
+            assertThat(booking.catalog().displayName()).isEqualTo("अनन्या मिठाई");
+            assertThat(accept(quote(1, "kaju-katli", 500, "18:30")).status()).isEqualTo(201);
+            assertThat(db.queryForObject("SELECT body FROM outbox_messages WHERE kind='CONFIRMED'", String.class))
+                    .startsWith("अनन्या मिठाई #4821");
+            mvc.perform(get("/api/staff/snapshot").header("X-Staff-Token", "test-role-staff"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.shop.displayName").value("अनन्या मिठाई"));
+        } finally {
+            shop.updateProfile(previous);
+        }
+    }
+
+    @Test
+    void catalogQuotesNoContactAndReportsRealPortionsAndWeighedTrayWindowsWithoutWrites() throws Exception {
+        mvc.perform(get("/api/shop/menu")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/shop/menu").header("X-Staff-Token", "test-role-staff"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.items.length()").value(2));
+        var initial = booking.catalog();
+        var kaju = initial.items().stream().filter(item -> item.sku().equals("kaju-katli")).findFirst().orElseThrow();
+        var barfi = initial.items().stream().filter(item -> item.sku().equals("barfi")).findFirst().orElseThrow();
+        assertThat(kaju.pricePerKgPaise()).isEqualTo(120_000);
+        assertThat(kaju.portions()).containsExactly(new MenuPortion(250, 30_000, "18:00", "19:00"), new MenuPortion(500, 60_000, "18:00", "19:00"));
+        assertThat(barfi.pricePerKgPaise()).isEqualTo(90_000);
+        assertThat(barfi.portions()).containsExactly(new MenuPortion(250, 22_500, "18:00", null), new MenuPortion(500, 45_000, "18:00", null));
+        db.update("UPDATE batches SET blocked=TRUE WHERE id='A'");
+        var blocked = booking.catalog().items().stream().filter(item -> item.sku().equals("kaju-katli")).findFirst().orElseThrow();
+        assertThat(blocked.portions()).containsExactly(new MenuPortion(250, 30_000, null, "19:00"), new MenuPortion(500, 60_000, null, "19:00"));
+        db.update("UPDATE batches SET phone_grams_free=0 WHERE id='B'");
+        var exhausted = booking.catalog().items().stream().filter(item -> item.sku().equals("kaju-katli")).findFirst().orElseThrow();
+        assertThat(exhausted.portions()).containsExactly(new MenuPortion(250, 30_000, null, null), new MenuPortion(500, 60_000, null, null));
+        assertThat(json.writeValueAsString(initial)).doesNotContain("counter", "batchId", "phone", "customerName", "runId", "quoteId");
+        assertThat(count("SELECT COUNT(*) FROM quotes")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM booking_sessions")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM voice_sessions")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages")).isZero();
+        assertThat(used("19:00")).isZero();
     }
 
     private void normal() { when(policy.current()).thenReturn(policy(false)); }

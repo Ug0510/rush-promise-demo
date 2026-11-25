@@ -1,0 +1,1 @@
+ALTER TABLE flagsmith_policy_cache ADD COLUMN provider_updated_at TIMESTAMPTZ;

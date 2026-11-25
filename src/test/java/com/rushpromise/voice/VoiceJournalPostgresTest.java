@@ -9,7 +9,10 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rushpromise.booking.BookingService;
 import com.rushpromise.booking.PolicyService;
@@ -18,13 +21,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -36,8 +44,10 @@ import java.util.concurrent.atomic.AtomicInteger;
         "spring.datasource.username=${RUSH_TEST_JDBC_USER:shop_app}",
         "spring.datasource.password=${RUSH_TEST_JDBC_PASSWORD}",
         "rush.demo.date=2031-02-09",
-        "rush.voice.recovery-ms=600000"
+        "rush.voice.recovery-ms=600000",
+        "RUSH_SARVAM_TOOL_TOKEN=native-tool-fixture-only"
 })
+@AutoConfigureMockMvc
 @ActiveProfiles("demo")
 @EnabledIfEnvironmentVariable(named = "RUSH_TEST_JDBC_URL", matches = "jdbc:postgresql:.*/rush_test_[A-Za-z0-9_]+(?:\\?.*)?")
 class VoiceJournalPostgresTest {
@@ -47,18 +57,40 @@ class VoiceJournalPostgresTest {
     private static final String KAJU = "एक किलो काजू कतली, नहीं आधा किलो, साढ़े छह बजे।";
 
     @Autowired VoiceSessionService service;
+    @Autowired VoiceConversation conversation;
     @Autowired VoiceTurnJournal journal;
     @Autowired BookingService booking;
     @Autowired ShopService shop;
     @Autowired JdbcTemplate db;
     @Autowired ObjectMapper json;
     @Autowired TransactionTemplate transactions;
+    @Autowired MockMvc mvc;
     @MockitoBean PolicyService policy;
 
     @BeforeEach
     void reset() {
         flags(false);
         assertThat(shop.reset(null).status()).isEqualTo(200);
+    }
+
+    @Test
+    void menuAndPriceKeepCurrentQuoteAndExplicitLanguageSurvivesRestart() {
+        var initial = speak(1, null, KAJU).quote();
+        var english = speak(2, initial.id(), "English please");
+        assertThat(english.language()).isEqualTo("en-IN");
+        assertThat(english.quote().id()).isEqualTo(initial.id());
+        var quoteAgain = restarted().turn(input(3, initial.id()),
+                () -> new SarvamSpeech.Transcript("yes, what is the price of 500 grams of kaju katli?", "hi-IN"));
+        assertThat(quoteAgain.replyText()).contains("600 rupees").contains("Say yes");
+        assertThat(quoteAgain.language()).isEqualTo("en-IN");
+        assertThat(quoteAgain.quote().id()).isEqualTo(initial.id());
+        var catalog = speak(4, initial.id(), "What sweets do you have?");
+        assertThat(catalog.quote().id()).isEqualTo(initial.id());
+        assertThat(catalog.replyText()).contains("Kaju katli").contains("Barfi");
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        var finalYes = speak(5, initial.id(), "yes");
+        assertThat(finalYes.order().status()).isEqualTo("CONFIRMED");
+        assertThat(finalYes.language()).isEqualTo("en-IN");
     }
 
     @Test
@@ -115,7 +147,7 @@ class VoiceJournalPostgresTest {
             assertThat(booking.accept(quote.id().toString(), assent, null).status()).isEqualTo(201);
             return Outcome.error(503, "BOOKING_UNCERTAIN", null);
         }).when(losingConnection).accept(eq(quote.id().toString()), eq(assent), isNull());
-        var waiting = new VoiceSessionService(losingConnection, journal)
+        var waiting = new VoiceSessionService(losingConnection, journal, conversation)
                 .turn(input(2, quote.id()), () -> spoken("हाँ"));
         assertThat(waiting.state()).isEqualTo("CHECKING_BOOKING");
         assertThat(restarted().poll(SESSION, "turn-2", PHONE).state()).isEqualTo("CHECKING_BOOKING");
@@ -256,8 +288,95 @@ class VoiceJournalPostgresTest {
         assertThat(count("SELECT COUNT(*) FROM voice_turns WHERE sequence=2 AND status='FAILED'")).isEqualTo(1);
     }
 
+    @Test
+    void nativeToolResolvesMixedCorrectionsAndPersistsOnlyAnExplicitCurrentAssent() throws Exception {
+        assertThat(nativeTurn(1, "haan", null).at("/state").asText()).isEqualTo("COLLECTING");
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        JsonNode kilo = nativeTurn(2, "Ek kilo kaju katli saat baje", null);
+        assertOffer(kilo, 1000, 120_000, "19:00");
+        JsonNode half = nativeTurn(3, "actually aadha kilo", null);
+        assertOffer(half, 500, 60_000, "19:00");
+        JsonNode newTime = nativeTurn(4, "saade saat kar do", null);
+        assertOffer(newTime, 500, 60_000, "19:30");
+        String oldQuoteId = newTime.at("/quote/id").asText();
+        JsonNode mixed = nativeTurn(5, "haan, but change to one kilo", oldQuoteId);
+        assertOffer(mixed, 1000, 120_000, "19:30");
+        String latestQuoteId = mixed.at("/quote/id").asText();
+        assertThat(latestQuoteId).isNotEqualTo(oldQuoteId);
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+
+        // An interrupted playback leaves no completed-quote ID; an old read-back ID is stale in the journal.
+        assertThat(nativeTurn(6, "haan", null).at("/quote/id").asText()).isEqualTo(latestQuoteId);
+        assertThat(nativeTurn(7, "haan", oldQuoteId).at("/quote/id").asText()).isEqualTo(latestQuoteId);
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        JsonNode saved = nativeTurn(8, "haan", latestQuoteId);
+        assertThat(saved.at("/order/id").asInt()).isEqualTo(4821);
+        assertThat(saved.at("/order/grams").asInt()).isEqualTo(1000);
+        assertThat(saved.at("/order/pickupTime").asText()).isEqualTo("19:30");
+        assertThat(nativeTurn(8, "haan", latestQuoteId).at("/order")).isEqualTo(saved.at("/order"));
+        assertThat(count("SELECT COUNT(*) FROM orders")).isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) FROM booking_keys WHERE status=201")).isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) FROM outbox_messages WHERE kind='CONFIRMED'")).isEqualTo(1);
+    }
+
+    @Test
+    void unsupportedWeightRepeatsAndUnusableSpeechNeverReserveStock() throws Exception {
+        JsonNode unsupported = nativeTurn(1, "350 gram kaju katli saade chhe baje", null);
+        assertThat(unsupported.at("/quote").isNull()).isTrue();
+        assertThat(unsupported.at("/replyText").asText()).contains("250", "500");
+        assertThat(count("SELECT COUNT(*) FROM quotes")).isZero();
+        JsonNode draft = nativeTurn(2, "500 gram", null);
+        assertOffer(draft, 500, 60_000, "18:30");
+        String id = draft.at("/quote/id").asText();
+        assertThat(nativeTurn(3, "dobara", null).at("/quote/id").asText()).isEqualTo(id);
+        assertThat(count("SELECT COUNT(*) FROM quotes")).isEqualTo(1);
+        assertThat(nativeTurn(4, "hmm what", null).at("/quote/id").asText()).isEqualTo(id);
+        assertThat(nativeTurn(5, "ba da", null).at("/state").asText()).isEqualTo("HANDOFF");
+        assertThat(nativeTurn(6, "haan", id).at("/state").asText()).isEqualTo("ENDED");
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        assertThat(count("SELECT phone_grams_free FROM batches WHERE id='A'")).isEqualTo(500);
+    }
+
+    @Test
+    void demoResetStartsANewVoiceRunAndRemovesAllOldPromptState() {
+        var oldQuote = speak(1, null, KAJU).quote();
+        assertThat(count("SELECT COUNT(*) FROM voice_sessions")).isEqualTo(1);
+        assertThat(count("SELECT COUNT(*) FROM voice_turns")).isEqualTo(1);
+        shop.reset(null);
+        assertThat(count("SELECT COUNT(*) FROM voice_sessions")).isZero();
+        assertThat(count("SELECT COUNT(*) FROM voice_turns")).isZero();
+        assertThat(restarted().turn(input(2, oldQuote.id()), () -> spoken("हाँ")).order()).isNull();
+        assertThat(speak(3, null, KAJU).quote().id()).isNotEqualTo(oldQuote.id());
+    }
+
+    private JsonNode nativeTurn(int sequence, String utterance, String confirmationQuote) throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("event", "turn");
+        body.put("interactionId", "sarvam-local-fixture");
+        body.put("turnId", "native-" + sequence);
+        body.put("sequence", sequence);
+        body.put("customerName", "Native fixture");
+        body.put("phone", PHONE);
+        body.put("utterance", utterance);
+        if (confirmationQuote != null) body.put("confirmationQuoteId", confirmationQuote);
+        String reply = mvc.perform(post("/api/voice/sarvam/turn")
+                        .header("Authorization", "Bearer native-tool-fixture-only")
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(body)))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        return json.readTree(reply);
+    }
+
+    private static void assertOffer(JsonNode reply, int grams, int paise, String pickupTime) {
+        assertThat(reply.at("/state").asText()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(reply.at("/quote/itemName").asText()).isEqualTo("Kaju katli");
+        assertThat(reply.at("/quote/grams").asInt()).isEqualTo(grams);
+        assertThat(reply.at("/quote/pricePaise").asInt()).isEqualTo(paise);
+        assertThat(reply.at("/quote/pickupTime").asText()).isEqualTo(pickupTime);
+        assertThat(reply.at("/order").isNull()).isTrue();
+    }
+
     private VoiceSessionService restarted() {
-        return new VoiceSessionService(booking, new VoiceTurnJournal(db, json, transactions, 15));
+        return new VoiceSessionService(booking, new VoiceTurnJournal(db, json, transactions, 15), conversation);
     }
 
     private void markAccepted(int sequence, UUID quote) {

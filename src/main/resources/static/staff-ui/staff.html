@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0b1424">
+  <meta name="theme-color" content="#f2f3f0">
   <title>Pickup desk · Rush Promise</title>
   <link rel="stylesheet" href="/voice-ui/caller.css">
   <link rel="stylesheet" href="/staff-ui/staff.css">
@@ -12,17 +12,23 @@
 <body>
   <div class="desk">
     <header class="desk-top">
-      <div class="desk-heading"><span class="brand"><span class="brand-mark" aria-hidden="true">❯❯</span>Rush Promise</span><h1>Pickup desk</h1></div>
+      <span class="brand">Rush Promise</span>
+      <nav id="desk-nav" aria-label="Pickup desk sections" hidden>
+        <a href="#pickup" aria-current="location">Pickup desk</a>
+        <a href="#stock">Stock</a>
+        <a href="#activity">Activity</a>
+      </nav>
       <div id="desk-tools" class="desk-tools" hidden>
-        <div class="policy-readback"><p id="policy-status" class="policy-status"></p><small id="policy-summary"></small></div>
-        <a id="flagsmith" class="desk-link" href="https://app.flagsmith.com/" target="_blank" rel="noopener noreferrer" hidden>Edit in Flagsmith ↗</a>
-        <button id="refresh" type="button" class="button quiet icon-button" aria-label="Refresh pickup desk" title="Refresh pickup desk">↻</button>
-        <button id="logout" type="button" class="button quiet">Lock desk</button>
+        <span id="live-state" class="live-state" role="status" data-status="connecting">Connecting</span>
+        <span id="staff-role" class="role-label" aria-label="Access role"></span>
+        <button id="shop-settings" class="role-label role-button" type="button" aria-haspopup="dialog" aria-label="Owner shop settings" hidden>Owner</button>
+        <button id="refresh" type="button" class="button icon-button" aria-label="Refresh pickup desk" title="Refresh pickup desk">↻</button>
+        <button id="logout" type="button" class="button icon-button" aria-label="Lock desk" title="Lock desk"><span class="lock-icon" aria-hidden="true"></span></button>
       </div>
     </header>
 
     <form id="staff-login" class="sign-in">
-      <h2>Unlock pickup desk</h2>
+      <h1>Unlock pickup desk</h1>
       <p>Use your staff or owner access token.</p>
       <label>Access token <input id="staff-token" type="password" required autocomplete="off" spellcheck="false"></label>
       <button class="button primary" type="submit">Unlock desk</button>
@@ -30,33 +36,84 @@
     </form>
 
     <main id="workspace" hidden>
+      <section id="pickup" class="desk-title">
+        <h1 id="desk-heading" tabindex="-1">Pickup desk</h1>
+        <p class="shop-clock">Shop time <strong id="shop-clock">—</strong></p>
+      </section>
       <p id="connection" class="connection" role="status" hidden></p>
-      <dl class="overview">
-        <div><dt>Next pickup</dt><dd id="next-pickup">—</dd></div>
-        <div><dt>Phone tray</dt><dd id="tray-stock">—</dd></div>
-        <div><dt>Owner decision</dt><dd id="pending-count">—</dd></div>
-      </dl>
+      <p id="desk-error" class="desk-error" role="alert" hidden></p>
       <div class="desk-columns">
-        <section class="up-next" aria-labelledby="up-next-title">
-          <div class="section-title"><h2 id="up-next-title">Up next</h2><p id="shop-clock"></p></div>
-          <div id="spotlight"></div>
-          <div id="queue" class="queue"></div>
-        </section>
-        <aside class="decisions" aria-labelledby="decisions-title">
-          <h2 id="decisions-title">Needs approval</h2>
-          <div id="approvals"></div>
-          <section class="inventory" aria-labelledby="inventory-title">
-            <h3 id="inventory-title">Phone tray</h3>
+        <div class="desk-column">
+          <section class="pack-panel surface" aria-labelledby="pack-title">
+            <h2 id="pack-title">Pack next</h2>
+            <div id="spotlight"></div>
+            <div id="queue" class="queue"></div>
+          </section>
+          <section id="owner-decisions" class="surface needs-approval" aria-labelledby="decisions-title">
+            <div class="section-title">
+              <h2 id="decisions-title">Needs owner approval</h2><span id="pending-count" class="pending-count" hidden></span>
+            </div>
+            <div id="approvals"></div>
+            <div class="policy-line">
+              <p id="policy-status" class="policy-status"></p>
+              <a id="flagsmith" class="desk-link" href="https://app.flagsmith.com/" target="_blank" rel="noopener noreferrer" hidden>Edit in Flagsmith ↗</a>
+            </div>
+          </section>
+        </div>
+        <div class="desk-column">
+          <aside class="next-panel surface" aria-labelledby="next-title">
+            <h2 id="next-title">Next pickup to offer</h2>
+            <p id="next-pickup" class="next-time">—</p>
+            <p id="next-description" class="next-description"></p>
+            <div id="next-tray" class="next-tray" hidden>
+              <strong id="next-tray-grams"></strong><p id="next-ready"></p>
+            </div>
+          </aside>
+          <section id="stock" class="surface secondary" aria-labelledby="inventory-title">
+            <h2 id="inventory-title">Phone stock</h2>
             <div id="batches"></div>
           </section>
-        </aside>
+        </div>
       </div>
-      <section class="recent" aria-labelledby="recent-title">
-        <div class="section-title"><h2 id="recent-title">Recent orders</h2><span id="staff-role" class="muted"></span></div>
+      <div id="notice-strip" class="surface notice-strip" role="status" hidden></div>
+      <section id="activity" class="surface secondary activity-panel" aria-labelledby="activity-title">
+        <div class="section-title"><h2 id="activity-title">Order updates</h2><span id="policy-summary" class="muted"></span></div>
+        <ol id="updates" class="activity"></ol>
+      </section>
+      <section class="surface recent" aria-labelledby="recent-title" hidden id="recent-section">
+        <div class="section-title"><h2 id="recent-title">Recent orders</h2></div>
         <div id="recent"></div>
       </section>
-      <p id="desk-error" class="desk-error" role="alert" hidden></p>
     </main>
+    <dialog id="profile-dialog" aria-labelledby="profile-title">
+      <form id="profile-form">
+        <h2 id="profile-title">Shop settings</h2>
+        <label class="profile-name">Shop name <input id="shop-name" name="displayName" required maxlength="70" autocomplete="organization"></label>
+        <section class="greeting-preview" aria-labelledby="greeting-title">
+          <h3 id="greeting-title"><span aria-hidden="true">◖))</span> What callers will hear</h3>
+          <p id="greeting-text" lang="hi-IN"></p>
+        </section>
+        <p class="muted">New calls use the saved name.</p>
+        <p id="profile-error" class="desk-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="profile-cancel" type="button" class="button quiet">Cancel</button>
+          <button id="profile-save" type="submit" class="button primary">Save name</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="action-dialog" aria-labelledby="dialog-title">
+      <form id="action-form">
+        <h2 id="dialog-title"></h2>
+        <p id="dialog-detail"></p>
+        <label id="dialog-weight" hidden>Grams <input id="action-grams" type="number" min="0" step="1" inputmode="numeric"></label>
+        <p id="dialog-error" class="desk-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="dialog-close" type="button" class="button quiet">Close</button>
+          <button id="dialog-decline" type="button" class="button quiet" hidden>Decline</button>
+          <button id="dialog-submit" type="submit" class="button primary"></button>
+        </div>
+      </form>
+    </dialog>
   </div>
 </body>
 </html>

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 public final class BookingModels {
@@ -15,10 +16,26 @@ public final class BookingModels {
     public record CountRequest(Integer grams) {}
     public record ResetRequest(String preset, String phone) {}
     public record ClockRequest(String now) {}
+    public record ProfileRequest(String displayName) {}
+    public record ShopProfile(String displayName, Instant updatedAt) {}
+    public record ShopMenu(String displayName, List<MenuItem> items) {}
+    public record MenuItem(String sku, String itemName, int pricePerKgPaise, List<MenuPortion> portions) {}
+    public record MenuPortion(int grams, int pricePaise, String readyPickup, String futurePickup) {}
+
+    public record Availability(AvailabilityOption option, String reason) {}
+    public record AvailabilityOption(String sku, String itemName, int grams, String pickupTime, Instant pickupAt,
+                                     String batchId, String batchReadyTime, int batchFreeGrams, String batchStatus) {}
 
     public record Policy(String version, String source, Instant fetchedAt, Instant evaluatedAt,
                          boolean rushMode, int maxGrams, int approvalAboveGrams, int approvalHoldMinutes,
-                         int leadMinutes, int ttlSeconds, int pickupGraceMinutes) {}
+                         int leadMinutes, int ttlSeconds, int pickupGraceMinutes, Instant providerUpdatedAt) {
+        public Policy(String version, String source, Instant fetchedAt, Instant evaluatedAt, boolean rushMode,
+                      int maxGrams, int approvalAboveGrams, int approvalHoldMinutes, int leadMinutes,
+                      int ttlSeconds, int pickupGraceMinutes) {
+            this(version, source, fetchedAt, evaluatedAt, rushMode, maxGrams, approvalAboveGrams,
+                    approvalHoldMinutes, leadMinutes, ttlSeconds, pickupGraceMinutes, null);
+        }
+    }
 
     public record Quote(UUID id, String sessionId, String sku, String itemName, int grams,
                         int pricePaise, String pickupTime, Instant pickupAt, String batchId,

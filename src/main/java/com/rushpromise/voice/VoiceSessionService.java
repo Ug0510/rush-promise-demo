@@ -23,10 +23,12 @@ class VoiceSessionService {
     private static final DateTimeFormatter SPOKEN_TIME = DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH);
     private final BookingService booking;
     private final VoiceTurnJournal journal;
+    private final VoiceConversation conversation;
 
-    VoiceSessionService(BookingService booking, VoiceTurnJournal journal) {
+    VoiceSessionService(BookingService booking, VoiceTurnJournal journal, VoiceConversation conversation) {
         this.booking = booking;
         this.journal = journal;
+        this.conversation = conversation;
     }
 
     Reply turn(Turn input, Utterance source) {
@@ -49,11 +51,18 @@ class VoiceSessionService {
             var failed = journal.completeSpeech(work, session -> new Decision(currentPrompt(session, ""), null, false, true));
             return settled(failed, state);
         }
+        var question = VoiceConversation.classify(spoken);
         Settlement result;
         try {
             result = journal.completeSpeech(work, session -> {
-                session.hindi = !"en-IN".equalsIgnoreCase(transcript.language());
-                return apply(session, input, spoken);
+                if (question.language() != null) {
+                    session.hindi = "hi-IN".equals(question.language());
+                    session.languageChosen = true;
+                } else if (!session.languageChosen && !spoken.isBlank()) {
+                    if (session.last == null) session.hindi = !"en-IN".equalsIgnoreCase(transcript.language());
+                    session.languageChosen = true;
+                }
+                return apply(session, input, spoken, question);
             });
         } catch (DataAccessException | TransactionException ex) {
             // A failed acknowledgement could mean assent is already journaled; the recovery job will check.
@@ -124,7 +133,7 @@ class VoiceSessionService {
         return new Reply(prompt.state(), "", apology + prompt.replyText(), prompt.language(), prompt.quote(), prompt.order());
     }
 
-    private Decision apply(Session session, Turn input, String spoken) {
+    private Decision apply(Session session, Turn input, String spoken, VoiceConversation.Query question) {
         if (spoken.isBlank()) {
             if (++session.silences >= 3) {
                 session.quote = null;
@@ -135,7 +144,27 @@ class VoiceSessionService {
             return Decision.plain(currentPrompt(session, spoken));
         }
         session.silences = 0;
+        if (question.kind() != VoiceConversation.Kind.BOOKING) {
+            session.unclearTurns = 0;
+            String info = conversation.answer(question, session.hindi, session.sku, session.grams);
+            if (session.quote != null) {
+                Reply prompt = currentPrompt(session, spoken);
+                return Decision.plain(new Reply(prompt.state(), spoken, info + " " + prompt.replyText(),
+                        prompt.language(), prompt.quote(), null));
+            }
+            return Decision.plain(render("COLLECTING", spoken, info + " " + currentPrompt(session, spoken).replyText(),
+                    session.hindi ? "hi-IN" : "en-IN", null, null));
+        }
         var intent = SpeechIntent.parse(spoken);
+        if (intent.decision() == UNCLEAR) {
+            if (++session.unclearTurns < 2) return Decision.plain(unavailable(session));
+            session.quote = null;
+            Reply handoff = localized(session, "HANDOFF", spoken, "Please contact the shop so a person can help with your order.",
+                    "कृपया दुकान से संपर्क करें ताकि कोई आपके ऑर्डर में मदद कर सके।", null, null);
+            return new Decision(handoff, null, true, false);
+        }
+        session.unclearTurns = 0;
+        if (intent.decision() == REPEAT) return Decision.plain(currentPrompt(session, spoken));
         if (intent.decision() == NO) {
             session.quote = null;
             return Decision.plain(localized(session, "COLLECTING", spoken,
@@ -148,7 +177,6 @@ class VoiceSessionService {
             }
             return new Decision(uncertainReply(session, spoken), session.quote.id(), false, false);
         }
-        if (intent.decision() == UNCLEAR) return Decision.plain(currentPrompt(session, spoken));
 
         if (intent.sku() != null) session.sku = intent.sku();
         if (intent.grams() != null) session.grams = intent.grams();
@@ -189,7 +217,8 @@ class VoiceSessionService {
             return readback(session, transcript, outcome.code(), outcome.reason());
         }
         return switch (outcome.code()) {
-            case "UNSUPPORTED_WEIGHT", "TOO_LARGE" -> localized(session, "COLLECTING", transcript,
+            case "UNSUPPORTED_WEIGHT" -> unsupportedWeight(session, transcript);
+            case "TOO_LARGE" -> localized(session, "COLLECTING", transcript,
                     "That weight isn't available. Try 250 grams, 500 grams, or a whole kilo amount.",
                     "यह वज़न उपलब्ध नहीं है। ढाई सौ ग्राम, आधा किलो, या पूरे किलो का वज़न बताइए।", null, null);
             case "PENDING_APPROVAL_LIMIT" -> localized(session, "COLLECTING", transcript,
@@ -201,11 +230,20 @@ class VoiceSessionService {
         };
     }
 
+    private Reply unsupportedWeight(Session session, String transcript) {
+        if (session.grams != null && session.grams < 1000) {
+            return localized(session, "COLLECTING", transcript, "Would you like 250 grams or 500 grams?",
+                    "आप 250 ग्राम लेंगे या 500 ग्राम?", null, null);
+        }
+        return localized(session, "COLLECTING", transcript, "Please choose a whole-kilo weight up to five kilos.",
+                "कृपया पाँच किलो तक पूरे किलो में वज़न बताइए।", null, null);
+    }
+
     private Reply currentPrompt(Session session, String transcript) {
         if (session.quote != null) return readback(session, transcript, "QUOTED", null);
         if (session.sku == null) return localized(session, "COLLECTING", transcript,
-                "Which sweet would you like, kaju katli or barfi?",
-                "आपको कौन सी मिठाई चाहिए, काजू कतली या बर्फी?", null, null);
+                "Tell me which sweet you'd like, or ask what is available.",
+                "बताइए आपको कौन सी मिठाई चाहिए, या पूछिए अभी क्या मिल सकता है।", null, null);
         if (session.grams == null) return localized(session, "COLLECTING", transcript,
                 "How much would you like?", "आपको कितना वज़न चाहिए?", null, null);
         if (session.pickupTime == null) return localized(session, "COLLECTING", transcript,

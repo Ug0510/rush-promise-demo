@@ -292,6 +292,8 @@ class VoiceTurnJournal {
         SavedOrder order;
         Reply last;
         int silences;
+        int unclearTurns;
         boolean hindi = true;
+        boolean languageChosen;
     }
 }

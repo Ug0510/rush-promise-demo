@@ -7,7 +7,12 @@ const replay = $("replay");
 const restart = $("restart");
 const retry = $("retry");
 const player = $("readback");
-const wave = document.querySelector(".voice-wave");
+const caller = document.querySelector(".caller");
+const indicator = $("recording-indicator");
+const wave = $("audio-meter");
+const heading = $("caller-heading");
+const speakLabel = $("speak-label");
+const actionHint = $("action-hint");
 const amount = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2, minimumFractionDigits: 0 });
 let session, sequence, quote, playedQuote, speakingQuote, recorder, pending, audioUrl, sealed, working;
 let microphoneTrack;
@@ -27,6 +32,10 @@ function beginSession() {
   sealed = false;
   working = false;
   form.hidden = false;
+  caller.dataset.stage = "collecting";
+  heading.textContent = "Speak your order";
+  $("intro").hidden = false;
+  actionHint.hidden = true;
   restart.hidden = true;
   $("heard").hidden = true;
   $("details").hidden = true;
@@ -35,7 +44,7 @@ function beginSession() {
   retry.textContent = "Retry this turn";
   speak.hidden = false;
   speak.disabled = false;
-  speak.textContent = "Start speaking";
+  speakLabel.textContent = "Start speaking";
   clearAudio();
   showError("");
   showPhase("idle", "Microphone off");
@@ -48,6 +57,7 @@ function showError(text) {
 
 function showPhase(phase, text) {
   wave.dataset.phase = phase;
+  indicator.dataset.phase = phase;
   $("mic-state").textContent = text;
 }
 
@@ -58,6 +68,7 @@ function clearAudio() {
   speakingQuote = null;
   player.removeAttribute("src");
   replay.hidden = true;
+  wave.hidden = true;
 }
 
 async function playReply() {
@@ -82,6 +93,8 @@ function loadAudio(encoded, promptQuote = null) {
   speakingQuote = promptQuote;
   player.src = audioUrl;
   replay.hidden = false;
+  wave.hidden = false;
+  $("heard").hidden = false;
   void playReply();
 }
 
@@ -91,22 +104,42 @@ function render(result) {
   quote = turn.quote?.id || null;
   playedQuote = null;
   sealed = Boolean(turn.order) || turn.state === "ENDED";
-  $("heard").hidden = !turn.transcript;
+  const pendingApproval = turn.order?.status === "AWAITING_APPROVAL";
+  const awaiting = turn.state === "CHECKING_BOOKING";
+  caller.dataset.stage = quote ? "quote" : sealed ? "complete" : awaiting ? "checking" : "collecting";
+  heading.textContent = quote ? "Confirm your pickup" : pendingApproval ? "Request received"
+    : turn.order ? "Pickup confirmed" : awaiting ? "Checking your booking"
+    : turn.state === "ENDED" ? "Voice checkout ended" : "Speak your order";
+  $("intro").hidden = Boolean(quote || sealed || awaiting);
+  $("heard").hidden = !turn.transcript && !result.audioWavBase64;
+  $("transcript-section").hidden = !turn.transcript;
   $("transcript").textContent = turn.transcript || "";
   $("details").hidden = !facts;
+  $("approval-note").hidden = !turn.quote?.requiresApproval;
+  $("order-number").hidden = !turn.order;
   if (facts) {
-    $("item").textContent = `${facts.grams >= 1000 ? facts.grams / 1000 + " kg" : facts.grams + " g"} ${facts.itemName}`;
+    const kaju = facts.itemName.toLowerCase() === "kaju katli";
+    $("quote-product").classList.toggle("has-kaju", kaju);
+    $("sweet-art").hidden = !kaju;
+    $("card-title").textContent = turn.order ? "Your pickup" : "Your quote";
+    $("item").textContent = facts.itemName;
+    $("grams").textContent = facts.grams >= 1000 ? facts.grams / 1000 + " kg" : facts.grams + " g";
     $("pickup").textContent = formatTime(facts.pickupTime);
     $("amount").textContent = amount.format(facts.pricePaise / 100);
+    if (turn.order) $("order-number").textContent = `Order #${turn.order.id}`;
   }
   const reply = $("reply");
   reply.hidden = !turn.replyText;
   reply.lang = turn.language || "hi-IN";
+  reply.dataset.audio = result.audioWavBase64 && !result.audioFallback ? "ready" : "unavailable";
   reply.textContent = turn.replyText || "";
   restart.hidden = !sealed;
   speak.hidden = sealed;
-  speak.textContent = quote && !result.audioWavBase64 ? "Say ‘repeat’ or change your order"
+  speakLabel.textContent = quote && !result.audioWavBase64 ? "Say repeat or change your order"
     : quote ? "Confirm by voice" : "Speak again";
+  actionHint.hidden = !quote;
+  actionHint.textContent = turn.quote?.requiresApproval ? "Say yes to request shop approval." : "Say yes to reserve this pickup.";
+  $("replay-label").textContent = quote ? "Replay quote" : "Replay response";
   showPhase("idle", quote ? "Read-back ready" : "Microphone off");
   clearAudio();
   if (result.audioWavBase64) loadAudio(result.audioWavBase64, result.audioFallback ? null : quote);
@@ -223,11 +256,11 @@ async function recordTurn() {
       const extension = type === "audio/mp4" ? "mp4" : type === "audio/ogg" ? "ogg" : "webm";
       pending.set("audio", new Blob(chunks, { type }), `turn.${extension}`);
       form.hidden = true;
-      speak.textContent = quote ? "Confirm by voice" : "Speak again";
+      speakLabel.textContent = quote ? "Confirm by voice" : "Speak again";
       void sendTurn();
     }, { once: true });
     recorder.start();
-    speak.textContent = "Done speaking";
+    speakLabel.textContent = "Done speaking";
     showPhase("recording", "Listening…");
     timer = setTimeout(() => {
       if (recorder?.state === "recording") recorder.stop();

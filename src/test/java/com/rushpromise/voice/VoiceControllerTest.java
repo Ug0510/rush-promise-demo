@@ -23,7 +23,8 @@ class VoiceControllerTest {
             "audio", "turn.webm", "audio/webm", new byte[]{0x1a, 0x45, (byte) 0xdf, (byte) 0xa3});
     private final SarvamSpeech speech = mock(SarvamSpeech.class);
     private final VoiceSessionService sessions = mock(VoiceSessionService.class);
-    private final VoiceController controller = new VoiceController(speech, sessions, new VoicePrompts(), BEARER, PHONE);
+    private final VoiceConversation conversation = mock(VoiceConversation.class);
+    private final VoiceController controller = new VoiceController(speech, sessions, new VoicePrompts(), conversation, BEARER, PHONE);
 
     @Test
     void bookingResultsHaveDistinctSavedAudioWhenSpeechSynthesisFails() {
@@ -62,7 +63,7 @@ class VoiceControllerTest {
         assertThatThrownBy(() -> controller.browserTurn(session, turn, 1, null, "Tester", "+919000000002", true, null))
                 .isInstanceOf(ResponseStatusException.class).hasMessageContaining("403");
         assertThatThrownBy(() -> controller.sarvamTurn("Bearer wrong",
-                new VoiceController.SarvamTurn("poll", session.toString(), null, 1, null, null, PHONE, null)))
+                new VoiceController.SarvamTurn("poll", session.toString(), null, 1, null, null, PHONE, null, null)))
                 .isInstanceOf(ResponseStatusException.class).hasMessageContaining("401");
     }
 
@@ -94,6 +95,40 @@ class VoiceControllerTest {
             release.countDown();
             executor.shutdown();
             assertThat(executor.awaitTermination(4, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void startupAndMenuNeedBearerButNoCallerIdentityOrBookingJournal() {
+        var greeting = new VoiceConversation.Greeting("Deepak Mithai Bhandar", "hi-IN", "नमस्ते।");
+        when(conversation.greet("hi-IN")).thenReturn(greeting);
+        when(conversation.menu("hi-IN")).thenReturn(greeting);
+        for (String event : new String[]{ "start", "menu" }) {
+            var request = new VoiceController.SarvamTurn(event, null, null, null, null, null, null, null, null);
+            assertThat(controller.sarvamTurn("Bearer " + BEARER, request).getBody()).isEqualTo(greeting);
+        }
+        verifyNoInteractions(sessions, speech);
+    }
+
+    @Test
+    void authenticNativeSlashInteractionIdentifierStaysStableAcrossRetriesAndEnd() {
+        String interaction = "Ab12:CD3/A1b2C3d4E5f6G7h8I9j0KLMNOP";
+        String session = "sarvam64:" + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(interaction.getBytes(StandardCharsets.US_ASCII));
+        var quoteRequest = new VoiceController.SarvamTurn(null, interaction, null, 1, null,
+                "Tester", PHONE, "आधा किलो काजू कतली, साढ़े छह बजे।", null);
+        when(sessions.turn(any(), any())).thenReturn(
+                new VoiceSessionService.Reply("COLLECTING", "", "Tell me more.", "hi-IN", null, null));
+        assertThat(controller.sarvamTurn("Bearer " + BEARER, quoteRequest).getStatusCode().value()).isEqualTo(200);
+        assertThat(controller.sarvamTurn("Bearer " + BEARER, quoteRequest).getStatusCode().value()).isEqualTo(200);
+        verify(sessions, times(2)).turn(argThat(turn -> turn.sessionId().equals(session) && turn.turnId().equals("turn-1")), any());
+        controller.sarvamTurn("Bearer " + BEARER,
+                new VoiceController.SarvamTurn("end", interaction, null, 0, null, null, null, null, null));
+        verify(sessions).end(session);
+        for (String malformed : new String[]{ "one/../two", "one/..", "{{interaction_id}}" }) {
+            assertThatThrownBy(() -> controller.sarvamTurn("Bearer " + BEARER,
+                    new VoiceController.SarvamTurn(null, malformed, null, 1, null, null, PHONE, "", null)))
+                    .isInstanceOf(ResponseStatusException.class).hasMessageContaining("400");
         }
     }
 

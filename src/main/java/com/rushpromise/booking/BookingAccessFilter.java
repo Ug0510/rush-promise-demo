@@ -23,7 +23,7 @@ import java.util.regex.Pattern;
 public class BookingAccessFilter extends OncePerRequestFilter {
     static final String STAFF_ROLE_ATTRIBUTE = "com.rushpromise.booking.BookingAccessFilter.role";
     private static final Pattern FULFILLMENT = Pattern.compile("/api/orders/[0-9]+/(pack|short|return)|/api/batches/[^/]+/ready");
-    private static final Pattern OWNER_ACTION = Pattern.compile("/api/orders/[0-9]+/(approve|reject|cancel)|/api/batches/[^/]+/unblock|/api/messages/.+");
+    private static final Pattern OWNER_ACTION = Pattern.compile("/api/orders/[0-9]+/(approve|reject|cancel)|/api/batches/[^/]+/unblock|/api/messages/.+|/api/shop/profile");
     private final String staffToken;
     private final String ownerToken;
     private final String operatorToken;

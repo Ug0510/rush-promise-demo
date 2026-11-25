@@ -9,11 +9,14 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.TransactionException;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.UUID;
 
 @Service
@@ -40,8 +43,7 @@ public class BookingService {
             Shop shop = store.shop();
             var item = item(request.sku());
             if (item == null) return Outcome.error(404, "ITEM_NOT_FOUND", null);
-            var pickup = shop.now().atZone(SHOP_ZONE).toLocalDate().atTime(LocalTime.parse(request.pickupTime()))
-                    .atZone(SHOP_ZONE).toInstant();
+            var pickup = requestedTime(shop, request.pickupTime());
             store.db.update("INSERT INTO booking_sessions (id,run_id,phone) VALUES (?,?,?) ON CONFLICT (id) DO NOTHING",
                     request.sessionId(), shop.runId(), request.phone());
             var session = session(request.sessionId());
@@ -56,17 +58,56 @@ public class BookingService {
         });
     }
 
+    public Availability nextAvailability(String sku, int grams, String pickupTime) {
+        if (!validIdentifier(sku) || (pickupTime != null && !validPickupTime(pickupTime))) {
+            return new Availability(null, "INVALID_REQUEST");
+        }
+        Policy current = policyService.current();
+        if (grams > current.maxGrams()) return new Availability(null, "TOO_LARGE");
+        if (!supportedGrams(grams)) return new Availability(null, "UNSUPPORTED_WEIGHT");
+        return transactions.execute(transaction -> {
+            var shop = store.shop();
+            var item = item(sku);
+            if (item == null) return new Availability(null, "ITEM_NOT_FOUND");
+            Instant requested = pickupTime == null ? shop.now() : requestedTime(shop, pickupTime);
+            var option = findOption(shop, current, sku, grams, requested, null);
+            if (option == null) return new Availability(null, "NONE_AVAILABLE");
+            String reason = pickupTime == null || option.pickupAt().equals(requested) ? null
+                    : availabilityReason(shop, current, sku, grams, requested);
+            var view = new AvailabilityOption(sku, item.name(), grams, shopTime(option.pickupAt()), option.pickupAt(),
+                    option.batchId(), shopTime(option.batchReadyAt()), option.freeGrams(), option.batchStatus());
+            return new Availability(view, reason);
+        });
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public ShopMenu catalog() {
+        Policy current = policyService.current();
+        var shop = store.shop();
+        List<CatalogItem> menu = store.db.query("SELECT sku,name,price_per_kg_paise FROM items ORDER BY name",
+                (row, index) -> new CatalogItem(row.getString("sku"), new Item(row.getString("name"), row.getInt("price_per_kg_paise"))));
+        List<MenuItem> items = menu.stream().map(entry -> {
+            List<MenuPortion> portions = List.of(250, 500).stream().map(grams -> {
+                var ready = findOption(shop, current, entry.sku(), grams, shop.now(), true);
+                var future = findOption(shop, current, entry.sku(), grams, shop.now(), false);
+                return new MenuPortion(grams, price(entry.item(), grams),
+                        ready == null ? null : shopTime(ready.pickupAt()), future == null ? null : shopTime(future.pickupAt()));
+            }).toList();
+            return new MenuItem(entry.sku(), entry.item().name(), entry.item().pricePerKgPaise(), portions);
+        }).toList();
+        return new ShopMenu(store.profile().displayName(), items);
+    }
+
     public Outcome accept(String quoteId, AcceptRequest request, String idempotencyKey) {
         UUID id = parseId(quoteId);
         if (id == null || request == null || !validIdentifier(request.sessionId()) || !validIdentifier(request.turnId())
                 || (idempotencyKey != null && !validIdentifier(idempotencyKey))) {
             return Outcome.error(400, "INVALID_REQUEST", null);
         }
-        Policy current = policyService.current();
         String derivedKey = "call:" + request.sessionId() + ":quote:" + id;
         String key = idempotencyKey == null ? derivedKey : "client:" + idempotencyKey;
         try {
-            return transactions.execute(transaction -> acceptLocked(id, request, current, key));
+            return transactions.execute(transaction -> acceptLocked(id, request, key));
         } catch (DataAccessException | TransactionException failure) {
             // A lost commit acknowledgement cannot tell us which outcome was durable. Resolve through the same key.
             return Outcome.error(503, "BOOKING_UNCERTAIN", null);
@@ -92,7 +133,7 @@ public class BookingService {
         }
     }
 
-    private Outcome acceptLocked(UUID quoteId, AcceptRequest request, Policy current, String key) {
+    private Outcome acceptLocked(UUID quoteId, AcceptRequest request, String key) {
         Shop shop = store.shop();
         lockKey(key);
         var replay = replay(shop, key, quoteId, request.sessionId());
@@ -108,6 +149,8 @@ public class BookingService {
         if (!quoteId.equals(session.latestQuoteId())) {
             return decide(shop, key, quoteId, request, Outcome.error(409, "STALE_ACCEPTANCE", null));
         }
+        // Read the current immutable policy after securing acceptance authority for this session.
+        Policy current = policyService.current();
         var item = item(quote.sku());
         var quoteRequest = new QuoteRequest(quote.sessionId(), quoteRow.name(), quoteRow.phone(), quote.sku(), quote.grams(), quote.pickupTime());
         boolean requiresApproval = quote.grams() > current.approvalAboveGrams();
@@ -170,14 +213,7 @@ public class BookingService {
     }
 
     private Quote replacement(Shop shop, QuoteRequest request, Item item, Policy policy, Instant requested) {
-        Instant earliest = shop.now().plus(policy.leadMinutes(), ChronoUnit.MINUTES);
-        Instant from = requested.isAfter(earliest) ? requested : earliest;
-        var option = store.find("""
-                SELECT s.pickup_at, b.id FROM pickup_slots s JOIN batches b
-                  ON b.sku = ? AND b.ready_at <= s.pickup_at - INTERVAL '15 minutes'
-                  WHERE s.pickup_at >= ? AND s.used < s.capacity AND NOT b.blocked AND b.phone_grams_free >= ?
-                  ORDER BY s.pickup_at, b.ready_at, b.id LIMIT 1
-                """, (r, n) -> new Option(at(r, "pickup_at"), r.getString("id")), request.sku(), sqlTime(from), request.grams());
+        var option = findOption(shop, policy, request.sku(), request.grams(), requested, null);
         if (option == null) return null;
         var quote = new Quote(UUID.randomUUID(), request.sessionId(), request.sku(), item.name(), request.grams(),
                 price(item, request.grams()), shopTime(option.pickupAt()), option.pickupAt(), option.batchId(),
@@ -190,6 +226,25 @@ public class BookingService {
                 quote.requiresApproval(), sqlTime(quote.expiresAt()), store.write(quote.policy()));
         store.db.update("UPDATE booking_sessions SET latest_quote_id = ? WHERE id = ?", quote.id(), quote.sessionId());
         return quote;
+    }
+
+    private Option findOption(Shop shop, Policy policy, String sku, int grams, Instant requested, Boolean readyNow) {
+        Instant earliest = shop.now().plus(policy.leadMinutes(), ChronoUnit.MINUTES);
+        Instant from = requested.isAfter(earliest) ? requested : earliest;
+        return store.find("""
+                SELECT s.pickup_at, b.id, b.ready_at, b.phone_grams_free, b.status FROM pickup_slots s JOIN batches b
+                  ON b.sku = ? AND b.ready_at <= s.pickup_at - make_interval(mins => ?)
+                  WHERE s.pickup_at >= ? AND s.used < s.capacity AND NOT b.blocked AND b.phone_grams_free >= ?
+                    AND (?::boolean IS NULL OR (b.status='READY' AND b.ready_at <= ?) = ?::boolean)
+                  ORDER BY s.pickup_at, b.ready_at, b.id LIMIT 1
+                """, (r, n) -> new Option(at(r, "pickup_at"), r.getString("id"), at(r, "ready_at"),
+                r.getInt("phone_grams_free"), r.getString("status")), sku, PACK_BUFFER_MINUTES, sqlTime(from), grams,
+                readyNow, sqlTime(shop.now()), readyNow);
+    }
+
+    private Instant requestedTime(Shop shop, String pickupTime) {
+        return shop.now().atZone(SHOP_ZONE).toLocalDate().atTime(LocalTime.parse(pickupTime))
+                .atZone(SHOP_ZONE).toInstant();
     }
 
     private String availabilityReason(Shop shop, Policy policy, String sku, int grams, Instant requested) {
@@ -242,8 +297,11 @@ public class BookingService {
     private static boolean validQuoteRequest(QuoteRequest request) {
         return request != null && validIdentifier(request.sessionId()) && validPhone(request.phone())
                 && request.customerName() != null && !request.customerName().isBlank() && request.customerName().length() <= 100
-                && validIdentifier(request.sku()) && request.pickupTime() != null
-                && request.pickupTime().matches("(?:[01][0-9]|2[0-3]):[0-5][0-9]") && request.grams() > 0;
+                && validIdentifier(request.sku()) && validPickupTime(request.pickupTime()) && request.grams() > 0;
+    }
+
+    private static boolean validPickupTime(String value) {
+        return value != null && value.matches("(?:[01][0-9]|2[0-3]):[0-5][0-9]");
     }
 
     static boolean validPhone(String value) {
@@ -267,8 +325,9 @@ public class BookingService {
     }
 
     private record Item(String name, int pricePerKgPaise) {}
+    private record CatalogItem(String sku, Item item) {}
     private record Batch(int free, Instant readyAt, boolean blocked) {}
     private record Slot(int used, int capacity) {}
-    private record Option(Instant pickupAt, String batchId) {}
+    private record Option(Instant pickupAt, String batchId, Instant batchReadyAt, int freeGrams, String batchStatus) {}
     private record Session(String phone, UUID latestQuoteId) {}
 }

@@ -6,10 +6,14 @@ import static com.rushpromise.booking.BookingStore.*;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.time.LocalTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -35,18 +39,55 @@ public class ShopService {
     }
 
     public Map<String, Object> stock() {
-        return transactions.execute(transaction -> {
-            var shop = store.shop();
-            var batches = store.db.query("SELECT * FROM batches ORDER BY id", (r, n) -> Map.of(
-                    "id", r.getString("id"), "sku", r.getString("sku"), "status", r.getString("status"),
-                    "readyAt", at(r, "ready_at"), "readyTime", shopTime(at(r, "ready_at")),
-                    "phoneGramsTotal", r.getInt("phone_grams_total"), "phoneGramsFree", r.getInt("phone_grams_free"),
-                    "counterGramsCounted", r.getInt("counter_grams_counted"), "blocked", r.getBoolean("blocked")));
-            var slots = store.db.query("SELECT * FROM pickup_slots ORDER BY pickup_at", (r, n) -> Map.of(
-                    "pickupAt", at(r, "pickup_at"), "pickupTime", shopTime(at(r, "pickup_at")),
-                    "capacity", r.getInt("capacity"), "used", r.getInt("used")));
-            return Map.of("runId", shop.runId(), "now", shop.now(), "shopTime", shopTime(shop.now()), "batches", batches, "slots", slots);
-        });
+        return transactions.execute(transaction -> stock(store.shop()));
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public Map<String, Object> snapshot(Policy policy) {
+        var shop = store.shop();
+        Map<Long, List<Map<String, Object>>> deliveries = new LinkedHashMap<>();
+        store.db.query("""
+                SELECT order_id,id,kind,status,created_at,updated_at FROM outbox_messages
+                WHERE run_id=? ORDER BY order_id,created_at,id
+                """, r -> {
+            deliveries.computeIfAbsent(r.getLong("order_id"), key -> new ArrayList<>()).add(messageView(r));
+        }, shop.runId());
+        return Map.of("orders", orders(), "stock", stock(shop), "policy", policy, "deliveries", deliveries, "shop", profile());
+    }
+
+    public ShopProfile profile() {
+        return store.profile();
+    }
+
+    public ShopProfile updateProfile(String value) {
+        String name = value == null ? "" : value.strip();
+        if (name.isBlank() || name.codePointCount(0, name.length()) > 70
+                || name.codePoints().anyMatch(cp -> Character.isISOControl(cp) || Character.getType(cp) == Character.FORMAT)) {
+            throw new IllegalArgumentException("Enter a shop name of 1 to 70 visible characters");
+        }
+        return store.saveProfile(name);
+    }
+
+    List<Map<String, Object>> messages(long id) {
+        return store.db.query("SELECT id,kind,status,created_at,updated_at FROM outbox_messages WHERE order_id = ? ORDER BY created_at,id",
+                (row, index) -> messageView(row), id);
+    }
+
+    private Map<String, Object> messageView(java.sql.ResultSet row) throws java.sql.SQLException {
+        return Map.of("id", row.getString("id"), "kind", row.getString("kind"), "status", row.getString("status"),
+                "createdAt", at(row, "created_at"), "updatedAt", at(row, "updated_at"));
+    }
+
+    private Map<String, Object> stock(Shop shop) {
+        var batches = store.db.query("SELECT * FROM batches ORDER BY id", (r, n) -> Map.of(
+                "id", r.getString("id"), "sku", r.getString("sku"), "status", r.getString("status"),
+                "readyAt", at(r, "ready_at"), "readyTime", shopTime(at(r, "ready_at")),
+                "phoneGramsTotal", r.getInt("phone_grams_total"), "phoneGramsFree", r.getInt("phone_grams_free"),
+                "counterGramsCounted", r.getInt("counter_grams_counted"), "blocked", r.getBoolean("blocked")));
+        var slots = store.db.query("SELECT * FROM pickup_slots ORDER BY pickup_at", (r, n) -> Map.of(
+                "pickupAt", at(r, "pickup_at"), "pickupTime", shopTime(at(r, "pickup_at")),
+                "capacity", r.getInt("capacity"), "used", r.getInt("used")));
+        return Map.of("runId", shop.runId(), "now", shop.now(), "shopTime", shopTime(shop.now()), "batches", batches, "slots", slots);
     }
 
     public Outcome action(long id, String action, Integer grams) {

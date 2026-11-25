@@ -14,6 +14,8 @@ final class SpeechIntent {
             "yes confirm", "पक्का", "pakka");
     private static final Set<String> NO = Set.of("no", "no thanks", "नहीं", "नही", "न", "ना", "nahi",
             "nahin", "nahi chahiye", "नहीं चाहिए", "मत करो", "cancel", "रहने दो", "rehne do");
+    private static final Set<String> REPEAT = Set.of("repeat", "please repeat", "dobara", "dubara", "phir se",
+            "दोबारा", "फिर से", "दोहराइए", "दोबारा बताइए");
     private static final Map<String, String> QUANTITY_WORDS = Map.ofEntries(
             Map.entry("aadha", "0.5"), Map.entry("adha", "0.5"), Map.entry("aada", "0.5"),
             Map.entry("आधा", "0.5"), Map.entry("आधे", "0.5"), Map.entry("half", "0.5"),
@@ -47,7 +49,7 @@ final class SpeechIntent {
             + "(" + SIX + "|" + SEVEN + "|" + EIGHT + "|" + NINE + ")"
             + "(?:\\s+(thirty|तीस|baje|बजे|pm|पीएम))?(?!" + BOUNDARY + ")");
 
-    enum Decision { YES, NO, ORDER, UNCLEAR }
+    enum Decision { YES, NO, REPEAT, ORDER, UNCLEAR }
 
     record Intent(Decision decision, String sku, Integer grams, String pickupTime) {}
 
@@ -57,6 +59,7 @@ final class SpeechIntent {
         String words = text.replaceAll("[^\\p{L}\\p{M}\\p{N}]+", " ").strip();
         if (YES.contains(words)) return new Intent(Decision.YES, null, null, null);
         if (NO.contains(words)) return new Intent(Decision.NO, null, null, null);
+        if (REPEAT.contains(words)) return new Intent(Decision.REPEAT, null, null, null);
 
         String item = null;
         var items = ITEM.matcher(text);

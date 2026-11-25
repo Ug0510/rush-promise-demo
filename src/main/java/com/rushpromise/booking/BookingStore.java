@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rushpromise.booking.BookingModels.Order;
 import com.rushpromise.booking.BookingModels.Policy;
 import com.rushpromise.booking.BookingModels.Quote;
+import com.rushpromise.booking.BookingModels.ShopProfile;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -74,13 +75,26 @@ class BookingStore {
                 at(row, "released_at"), row.getBoolean("return_to_tray"), row.getBoolean("check_stock"));
     }
 
+    ShopProfile profile() {
+        return db.queryForObject("SELECT display_name,profile_updated_at FROM shop_state WHERE id=1", this::profileRow);
+    }
+
+    ShopProfile saveProfile(String displayName) {
+        return db.queryForObject("UPDATE shop_state SET display_name=?,profile_updated_at=statement_timestamp() WHERE id=1 RETURNING display_name,profile_updated_at",
+                this::profileRow, displayName);
+    }
+
+    private ShopProfile profileRow(ResultSet row, int index) throws SQLException {
+        return new ShopProfile(row.getString("display_name"), at(row, "profile_updated_at"));
+    }
+
     void event(Order order, String kind, Instant now) {
         db.update("INSERT INTO order_events (run_id,order_id,kind,created_at) VALUES (?,?,?,?)",
                 order.runId(), order.id(), kind, sqlTime(now));
     }
 
     void message(Order order, String kind) {
-        String orderLabel = "Sharma Sweets #" + order.id() + " (" + order.grams() + " g " + order.itemName() + ")";
+        String orderLabel = profile().displayName() + " #" + order.id() + " (" + order.grams() + " g " + order.itemName() + ")";
         String pickup = order.pickupAt().atZone(SHOP_ZONE).format(java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.ENGLISH));
         String body = switch (kind) {
             case "CONFIRMED", "APPROVED" -> orderLabel + " is confirmed for " + pickup + " pickup. Pay at the counter.";
