@@ -24,10 +24,12 @@ import org.springframework.web.server.ResponseStatusException;
 class TwilioStatusController {
     private final DeliverySettings settings;
     private final OutboxRepository outbox;
+    private final OwnerWhatsApp owners;
 
-    TwilioStatusController(DeliverySettings settings, OutboxRepository outbox) {
+    TwilioStatusController(DeliverySettings settings, OutboxRepository outbox, OwnerWhatsApp owners) {
         this.settings = settings;
         this.outbox = outbox;
+        this.owners = owners;
     }
 
     @PostMapping(path = "/webhooks/twilio/status", consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE)
@@ -57,7 +59,7 @@ class TwilioStatusController {
         String code = read(form, "ErrorCode");
         String error = code != null && code.matches("\\d{3,8}") ? "TWILIO_ERROR_" + code : null;
         DeliveryResult update = DeliveryResult.providerStatus(messageStatus, sid, error);
-        if (update != null) {
+        if (update != null && !owners.observe(attempt, update)) {
             outbox.observe(attempt, update);
         }
     }

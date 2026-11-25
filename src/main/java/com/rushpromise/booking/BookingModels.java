@@ -10,10 +10,17 @@ import java.util.List;
 import java.util.UUID;
 
 public final class BookingModels {
+    public static final String TEXT_CHECKOUT_SESSION_PREFIX = "text:";
+
     private BookingModels() {}
 
     public record QuoteRequest(String sessionId, String customerName, String phone, String sku,
-                               @JsonAlias("quantity") int grams, String pickupTime) {}
+                               @JsonAlias("quantity") int grams, String pickupTime,
+                               @JsonAlias("pickupAt") Instant requestedPickupAt) {
+        public QuoteRequest(String sessionId, String customerName, String phone, String sku, int grams, String pickupTime) {
+            this(sessionId, customerName, phone, sku, grams, pickupTime, null);
+        }
+    }
     public record AcceptRequest(String sessionId, String turnId) {}
     public record CountRequest(Integer grams) {}
     public record ResetRequest(String preset, String phone) {}
@@ -32,6 +39,15 @@ public final class BookingModels {
     }
 
     public record Availability(AvailabilityOption option, String reason) {}
+    public record PickupPreview(String itemName, int quantity, String unit, int pricePaise, String pickupTime,
+                                boolean requiresApproval, Instant pickupAt) {}
+    public record PickupHours(boolean allDay, String opensAt, String closesAt, String timeZone) {}
+    public record PickupHoursInput(Boolean allDay, String opensAt, String closesAt) {}
+    public enum NativeIdentityKind {
+        CALLER, CALL, GUEST;
+
+        public boolean singlePickup() { return this != CALLER; }
+    }
     public record AvailabilityOption(String sku, String itemName, int grams, String pickupTime, Instant pickupAt,
                                      String batchId, String batchReadyTime, int batchFreeGrams, String batchStatus, String unit) {}
 
@@ -102,7 +118,8 @@ public final class BookingModels {
                         String customerName, String phone, String sku, String itemName, int grams,
                         int pricePaise, String pickupTime, Instant pickupAt, String batchId, String status,
                         Instant approvalExpiresAt, Policy policy, Instant createdAt, Instant packedAt,
-                        Instant releasedAt, boolean returnToTray, boolean checkStock, String unit) {
+                        Instant releasedAt, boolean returnToTray, boolean checkStock, String unit,
+                        @JsonInclude(JsonInclude.Include.NON_NULL) String pickupCode) {
         public Order { if (unit == null) unit = "GRAMS"; }
 
         public Order(long id, UUID runId, UUID acceptedQuoteId, String acceptedTurnId, String customerName,
@@ -111,7 +128,14 @@ public final class BookingModels {
                      Instant createdAt, Instant packedAt, Instant releasedAt, boolean returnToTray, boolean checkStock) {
             this(id, runId, acceptedQuoteId, acceptedTurnId, customerName, phone, sku, itemName, grams, pricePaise,
                     pickupTime, pickupAt, batchId, status, approvalExpiresAt, policy, createdAt, packedAt, releasedAt,
-                    returnToTray, checkStock, "GRAMS");
+                    returnToTray, checkStock, "GRAMS", null);
+        }
+        public Order(long id, UUID runId, UUID acceptedQuoteId, String acceptedTurnId, String customerName, String phone,
+                     String sku, String itemName, int grams, int pricePaise, String pickupTime, Instant pickupAt, String batchId,
+                     String status, Instant approvalExpiresAt, Policy policy, Instant createdAt, Instant packedAt,
+                     Instant releasedAt, boolean returnToTray, boolean checkStock, String unit) {
+            this(id, runId, acceptedQuoteId, acceptedTurnId, customerName, phone, sku, itemName, grams, pricePaise, pickupTime, pickupAt,
+                    batchId, status, approvalExpiresAt, policy, createdAt, packedAt, releasedAt, returnToTray, checkStock, unit, null);
         }
         @JsonProperty(access = JsonProperty.Access.READ_ONLY) public int quantity() { return grams; }
     }

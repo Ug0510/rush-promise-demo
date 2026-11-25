@@ -25,18 +25,15 @@ class DemoOwners implements ApplicationRunner {
     private final TenantInventory inventory;
     private final String file;
     private final String bundle;
-    private final boolean signupEnabled;
 
     DemoOwners(ObjectMapper json, OwnerAccounts accounts, TenantDirectory tenants, TenantInventory inventory,
-               @Value("${RUSH_DEMO_OWNER_FILE:}") String file, @Value("${RUSH_DEMO_OWNER_BUNDLE:}") String bundle,
-               @Value("${RUSH_SIGNUP_ENABLED:true}") boolean signupEnabled) {
+               @Value("${RUSH_DEMO_OWNER_FILE:}") String file, @Value("${RUSH_DEMO_OWNER_BUNDLE:}") String bundle) {
         this.json = json;
         this.accounts = accounts;
         this.tenants = tenants;
         this.inventory = inventory;
         this.file = file;
         this.bundle = bundle;
-        this.signupEnabled = signupEnabled;
     }
 
     @Override
@@ -51,9 +48,6 @@ class DemoOwners implements ApplicationRunner {
                     || !expectedSlug.equals(entry.slug())) invalid();
         }
         for (var entry : supplied.owners()) provision(entry);
-        if (!signupEnabled && accounts.accountCount() != 2) {
-            throw new IllegalStateException("This closed demo expects exactly two owner accounts");
-        }
     }
 
     private void provision(Entry entry) {
@@ -66,6 +60,7 @@ class DemoOwners implements ApplicationRunner {
         if (!shop.slug().equals(entry.slug())) throw new IllegalStateException("A demo owner is linked to a different shop");
         tenants.markFixture(shop);
         TenantContext.withSchema(shop.schema(), () -> {
+            inventory.seedDefaultPickupHours();
             List<TenantInventory.ProductInput> sample = "deepak-owner".equals(entry.username())
                     ? List.of(new TenantInventory.ProductInput("kaju-katli", "Kaju katli", "GRAMS", 120_000, 2000, null),
                               new TenantInventory.ProductInput("barfi", "Barfi", "GRAMS", 90_000, 3000, null))

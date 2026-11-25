@@ -32,4 +32,51 @@ class VoiceSessionServiceTest {
         assertThat(VoiceConversation.spokenItem("Pistachio brownie", true)).isEqualTo("Pistachio brownie");
     }
 
+    @Test
+    void preservesAnUnclearSingleDigitGramCorrectionForClarification() {
+        var conversation = new VoiceConversation(null, null);
+        var recognized = conversation.orderWords("चार ग्राम कर दीजिए।", "barfi");
+        assertThat(recognized.parsed().grams()).isEqualTo(4);
+        assertThat(recognized.ambiguousWeight()).isTrue();
+        assertThat(VoiceConversation.weightClarification(recognized.parsed().grams(), true)).contains("4 ग्राम", "इकाई");
+        var explicitKilograms = conversation.orderWords("चार किलो कर दीजिए।", "barfi");
+        assertThat(explicitKilograms.parsed().grams()).isEqualTo(4000);
+        assertThat(explicitKilograms.ambiguousWeight()).isFalse();
+        assertThat(conversation.orderWords("सिर्फ़ चार ग्राम चाहिए।", "barfi").ambiguousWeight()).isFalse();
+        for (String correction : new String[]{"दो सौ पचास ग्राम कर दीजिए।", "ढाई सौ ग्राम।", "do sau pachaas gram"}) {
+            var amount = conversation.orderWords(correction, "barfi");
+            assertThat(amount.parsed().grams()).isEqualTo(250);
+            assertThat(amount.ambiguousWeight()).isFalse();
+        }
+    }
+
+    @Test
+    void recognisesExactLiveAssentPhrasesWithoutEatingCorrections() {
+        for (String assent : new String[]{"कर दो।", "हां कन्फर्म है।", "हाँ, कंफर्म है।", "हाँ सर", "हाँ जी", "जी हाँ", "हाँ मैडम", "yes please", "yes sir"}) {
+            assertThat(SpeechIntent.parse(assent).decision()).isEqualTo(SpeechIntent.Decision.YES);
+        }
+        assertThat(SpeechIntent.parse("हाँ, ढाई सौ ग्राम कर दो।").decision()).isEqualTo(SpeechIntent.Decision.ORDER);
+        assertThat(SpeechIntent.parse("आठ बजे कर दो।").decision()).isEqualTo(SpeechIntent.Decision.ORDER);
+        assertThat(SpeechIntent.parse("अभी कन्फर्म नहीं है।").decision()).isNotEqualTo(SpeechIntent.Decision.YES);
+        assertThat(SpeechIntent.parse("हाँ सर?").decision()).isNotEqualTo(SpeechIntent.Decision.YES);
+        assertThat(SpeechIntent.parse("yes sir if the pickup is today").decision()).isNotEqualTo(SpeechIntent.Decision.YES);
+        assertThat(SpeechIntent.parse("yes sir, change it to 250 grams").decision()).isEqualTo(SpeechIntent.Decision.ORDER);
+        assertThat(SpeechIntent.confirmationCode("हाँ ४ २ ८ १।")).isEqualTo("4281");
+        assertThat(SpeechIntent.confirmationCode("हाँ चार दो आठ एक")).isEqualTo("4281");
+        assertThat(SpeechIntent.confirmationCode("Confirm code four two eight one")).isEqualTo("4281");
+        assertThat(SpeechIntent.confirmationCode("confirm code 4281 if the pickup is today")).isNull();
+        assertThat(SpeechIntent.confirmationCode("हाँ 4281?")).isNull();
+    }
+
+    @Test
+    void recognisesTomorrowMorningAndAnExplicitSecondOption() {
+        for (String request : new String[]{"tomorrow 09:00", "कल सुबह नौ बजे", "कल नौ बजे सुबह"}) {
+            assertThat(SpeechIntent.tomorrow(request)).isTrue();
+            assertThat(SpeechIntent.parse(request).pickupTime()).isEqualTo("09:00");
+        }
+        assertThat(SpeechIntent.parse("आज रात नौ बजे").pickupTime()).isEqualTo("21:00");
+        assertThat(SpeechIntent.pickupPosition("दूसरा वाला कर दीजिए।")).isEqualTo(1);
+        assertThat(SpeechIntent.pickupPosition("ढाई सौ ग्राम कर दीजिए।")).isNull();
+    }
+
 }

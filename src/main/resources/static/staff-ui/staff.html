@@ -7,7 +7,10 @@
   <title>Pickup desk · Rush Promise</title>
   <link rel="stylesheet" href="/voice-ui/caller.css">
   <link rel="stylesheet" href="/staff-ui/staff.css">
-  <script defer src="/staff-ui/staff.js"></script>
+  <link rel="stylesheet" href="/owner-ui/pickup-hours.css?v=20261125-phone">
+  <script defer src="/owner-ui/pickup-hours.js"></script>
+  <script defer src="/owner-ui/phone-notifications.js?v=20261125-phone"></script>
+  <script defer src="/staff-ui/staff.js?v=20261125-owner-demo"></script>
 </head>
 <body>
   <div class="desk">
@@ -28,15 +31,17 @@
       </div>
     </header>
 
-    <form id="staff-login" class="sign-in">
+    <form id="staff-login" class="sign-in" hidden>
       <h1>Unlock pickup desk</h1>
       <p>Use your staff or owner access token.</p>
       <label>Access token <input id="staff-token" type="password" required autocomplete="off" spellcheck="false"></label>
       <button class="button primary" type="submit">Unlock desk</button>
       <p id="login-error" class="desk-error" role="alert" hidden></p>
     </form>
+    <p id="desk-entry-error" class="sign-in desk-error" role="alert" hidden></p>
 
     <main id="workspace" hidden>
+      <p id="desk-demo-banner" class="muted" hidden>Sample shop. Changes stay in your demo.</p>
       <section id="pickup" class="desk-title">
         <div><p id="desk-shop" class="muted" hidden></p><h1 id="desk-heading" tabindex="-1">Pickup desk</h1></div>
         <p class="shop-clock">Shop time <strong id="shop-clock">—</strong></p>
@@ -97,11 +102,24 @@
       <form id="profile-form">
         <h2 id="profile-title">Shop settings</h2>
         <label class="profile-name">Shop name <input id="shop-name" name="displayName" required maxlength="70" autocomplete="organization"></label>
+        <fieldset id="desk-pickup-hours" class="pickup-hours" hidden disabled>
+          <legend>Pickup hours</legend>
+          <div class="hours-modes">
+            <label><input type="radio" name="desk-hours-mode" value="full"> <span>Full day</span></label>
+            <label><input type="radio" name="desk-hours-mode" value="range"> <span>Set hours</span></label>
+          </div>
+          <div class="hours-range" data-hours-range>
+            <label>Start time <input type="time" data-hours-start step="1800" required></label>
+            <label>End time <input type="time" data-hours-end step="1800" required></label>
+          </div>
+          <p class="hours-zone">India Standard Time (IST)</p>
+        </fieldset>
         <section class="greeting-preview" aria-labelledby="greeting-title">
           <h3 id="greeting-title"><span aria-hidden="true">◖))</span> What callers will hear</h3>
           <p id="greeting-text" lang="hi-IN"></p>
         </section>
         <p class="muted">New calls use the saved name.</p>
+        <section class="owner-phone-settings" id="desk-phone-settings" hidden></section>
         <p id="profile-error" class="desk-error" role="alert" hidden></p>
         <div class="dialog-actions">
           <button id="profile-cancel" type="button" class="button quiet">Cancel</button>

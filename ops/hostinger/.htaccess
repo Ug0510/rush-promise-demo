@@ -1,0 +1,9 @@
+DirectoryIndex index.html
+<IfModule mod_headers.c>
+  <FilesMatch "\.html$">
+    Header always set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+</IfModule>
+RewriteEngine On
+RewriteRule ^api/voice/sarvam/(?:turn|owner)$ - [E=RUSH_VOICE_AUTH:%{HTTP:Authorization}]
+RewriteRule ^(?:owner(?:/desk)?|caller|api/public/(?:site|shops)|api/voice/sarvam/(?:turn|owner)|api/twilio/owner-link)$ gateway.php [END]

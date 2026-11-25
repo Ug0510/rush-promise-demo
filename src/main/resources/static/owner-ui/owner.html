@@ -6,15 +6,18 @@
   <meta name="theme-color" content="#f2f3f0">
   <title>Owner workspace · Rush Promise</title>
   <link rel="stylesheet" href="/voice-ui/caller.css">
-  <link rel="stylesheet" href="/owner-ui/owner.css">
-  <script defer src="/owner-ui/owner.js"></script>
+  <link rel="stylesheet" href="/owner-ui/owner.css?v=20261125-owner-demo">
+  <link rel="stylesheet" href="/owner-ui/pickup-hours.css?v=20261125-phone">
+  <script defer src="/owner-ui/pickup-hours.js"></script>
+  <script defer src="/owner-ui/phone-notifications.js?v=20261125-phone"></script>
+  <script defer src="/owner-ui/owner.js?v=20261125-owner-demo"></script>
 </head>
 <body>
   <div class="owner-shell">
     <header class="owner-top">
       <div class="owner-brand"><span class="brand">Rush Promise</span><span id="brand-shop" hidden></span></div>
       <nav id="owner-nav" aria-label="Owner workspace" hidden>
-        <a href="/staff">Pickup desk</a>
+        <a href="/owner/desk">Pickup desk</a>
         <a href="#menu" data-view="menu" aria-current="page">Menu &amp; stock</a>
         <a href="#settings" data-view="settings">Shop settings</a>
       </nav>
@@ -23,18 +26,27 @@
 
     <main>
       <p id="loading" role="status" class="loading">Opening the owner workspace…</p>
+      <p id="demo-owner-banner" class="demo-owner-banner" hidden>Sample shop. Your changes stay in this demo for up to two hours.</p>
       <section id="owner-auth" class="auth-grid" hidden aria-labelledby="auth-title">
+        <aside class="surface demo-entry" id="demo-owner-entry">
+          <div><p>Try the owner desk with Deepak’s sample inventory. Changes stay in your demo.</p>
+            <p id="demo-entry-error" class="form-error" role="alert" hidden></p></div>
+          <button id="start-owner-demo" type="button" class="button primary">Try Deepak’s demo shop</button>
+        </aside>
         <form id="auth-form" class="surface auth-form">
           <h1 id="auth-title">Sign in to your shop</h1>
           <p id="auth-instructions">Use your owner account to manage your shop.</p>
-          <label>Username <input id="owner-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="48"></label>
+          <label>Username <input id="owner-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" aria-describedby="username-note username-error" required maxlength="40"></label>
+          <p id="username-note" class="film" hidden>Use 3–40 letters, digits, periods, underscores or hyphens. Start with a letter or number, like deepak-shop.</p>
+          <p id="username-error" class="form-error" role="alert" hidden></p>
           <label>Password
             <span class="password-wrap">
-              <input id="owner-password" name="password" type="password" autocomplete="current-password" required maxlength="128">
+              <input id="owner-password" name="password" type="password" autocomplete="current-password" aria-describedby="password-note password-error" required maxlength="128">
               <button id="show-password" type="button" aria-label="Show password" aria-pressed="false">Show</button>
             </span>
           </label>
-          <p id="password-note" class="film" hidden>Use at least 12 characters.</p>
+          <p id="password-note" class="film" hidden>Use 12–128 characters. You can use a password suggested by your browser.</p>
+          <p id="password-error" class="form-error" role="alert" hidden></p>
           <p id="auth-error" class="form-error" role="alert" hidden></p>
           <button type="submit" id="auth-submit" class="button primary">Sign in</button>
           <p id="auth-alternative" class="auth-switch" hidden><span id="auth-switch-hint"></span> <button id="auth-switch" type="button"></button></p>
@@ -53,8 +65,21 @@
           <label>Shop link name <input name="slug" id="shop-slug" autocomplete="off" autocapitalize="none" spellcheck="false" pattern="[a-z0-9]+(-[a-z0-9]+)*" maxlength="48" required></label>
           <p id="slug-help" class="film">Use lowercase letters, numbers, and hyphens.</p>
           <label>Public area <input name="area" maxlength="120" placeholder="Optional"></label>
-          <label>Public opening hours <input name="hours" maxlength="120" placeholder="Optional"></label>
+          <input type="hidden" name="hours">
+        <fieldset id="owner-pickup-hours" class="pickup-hours" hidden disabled>
+          <legend>Pickup hours</legend>
+          <div class="hours-modes">
+            <label><input type="radio" name="owner-hours-mode" value="full"> <span>Full day</span></label>
+            <label><input type="radio" name="owner-hours-mode" value="range"> <span>Set hours</span></label>
+          </div>
+          <div class="hours-range" data-hours-range>
+            <label>Start time <input type="time" data-hours-start step="1800" required></label>
+            <label>End time <input type="time" data-hours-end step="1800" required></label>
+          </div>
+          <p class="hours-zone">India Standard Time (IST)</p>
+        </fieldset>
           <label>Customer pickup instructions <textarea name="pickupInstructions" maxlength="500" rows="3" placeholder="Optional"></textarea></label>
+          <section class="owner-phone-settings" id="owner-phone-settings" hidden></section>
           <p id="shop-error" class="form-error" role="alert" hidden></p>
           <p id="shop-saved" class="success" role="status" hidden></p>
           <a id="customer-checkout" class="button quiet" hidden>Open customer checkout</a>
@@ -67,6 +92,11 @@
           <h1 id="menu-title">Menu &amp; stock</h1>
           <button type="button" id="add-item" class="button primary"><span aria-hidden="true">+</span> Add item</button>
         </div>
+        <nav class="menu-links" id="menu-links" aria-label="After saving stock" hidden>
+          <a id="menu-customer-checkout" href="/caller" class="button quiet">Open your customer page <span aria-hidden="true">↗</span></a>
+          <a href="/owner/desk" class="button quiet">View pickup desk</a>
+        </nav>
+        <p id="new-owner-phone" class="film" hidden><a id="open-new-owner-phone" href="#settings">Set up phone and notifications</a></p>
         <p id="menu-error" class="form-error" role="alert" hidden></p>
         <div class="menu-grid">
           <div class="surface product-list">
@@ -82,7 +112,9 @@
             <label>Item name <input name="itemName" maxlength="80" required></label>
             <label>Sell by <select name="unit" id="unit" required><option value="GRAMS">Weight</option><option value="PIECE">Piece</option></select></label>
             <label><span id="product-price-label">Price per kg</span><span class="rupees"><span aria-hidden="true">₹</span><input name="price" type="text" inputmode="decimal" maxlength="11" required></span></label>
-            <label><span id="product-stock-label">Grams set aside for phone pickup</span><input name="stock" type="number" min="0" step="1" max="100000" inputmode="numeric" required></label>
+          <label><span id="product-stock-label">Grams set aside for phone pickup</span><input name="stock" type="number" min="0" step="1" max="100000" inputmode="numeric" aria-describedby="stock-meaning" required>
+            <span id="stock-meaning" class="film" hidden></span>
+          </label>
             <p id="product-error" class="form-error" role="alert" hidden></p>
             <p id="product-saved" class="success" role="status" hidden></p>
             <button type="submit" class="button primary" id="product-save">Save item</button>

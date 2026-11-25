@@ -14,8 +14,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -42,11 +45,11 @@ class VoiceTurnJournal {
         return transactions.execute(transaction -> {
             UUID runId = lockRun();
             Scope scope = new Scope(runId, input.sessionId());
-            SessionRow row = open(scope, fingerprint(scope, input.phone()));
+            SessionRow row = open(scope, fingerprint(scope, input.contactBinding()));
             var prior = row.state();
             if (row.ended() || prior.order != null) return new Access(null, prior, row.ended());
             TurnRow accepted = pending(scope);
-            if (accepted != null) return new Access(reclaim(scope, accepted), prior, false);
+            if (accepted != null) return new Access(reclaim(scope, accepted, prior.nativePickup), prior, false);
 
             TurnRow existing = findTurn(scope, input.turnId());
             if (existing != null && existing.sequence() != input.sequence()) {
@@ -56,7 +59,7 @@ class VoiceTurnJournal {
                 return new Access(null, prior, false);
             }
             if (existing != null) {
-                return new Access(reclaim(scope, existing), prior, false);
+                return new Access(reclaim(scope, existing, input.pickupSubject() != null), prior, false);
             }
             var token = UUID.randomUUID();
             db.update("""
@@ -65,7 +68,7 @@ class VoiceTurnJournal {
                     """, runId, scope.sessionId(), input.turnId(), input.sequence(), token, leaseSeconds);
             db.update("UPDATE voice_sessions SET max_sequence=?,touched_at=CURRENT_TIMESTAMP WHERE run_id=? AND session_id=?",
                     input.sequence(), runId, scope.sessionId());
-            return new Access(new Ticket(scope, input.turnId(), input.sequence(), token, "PROCESSING", null), prior, false);
+            return new Access(new Ticket(scope, input.turnId(), input.sequence(), token, "PROCESSING", null, input.pickupSubject() != null), prior, false);
         });
     }
 
@@ -81,6 +84,7 @@ class VoiceTurnJournal {
                 setTerminal(ticket, "DROPPED");
                 return new Settlement(null, row.ended() ? null : row.state().last, row.ended());
             }
+            row.state().nativePickup = ticket.nativePickup();
             Decision decision = apply.apply(row.state());
             persist(scope, row.state(), decision.reply(), decision.ended());
             if (decision.acceptedQuoteId() == null) {
@@ -92,7 +96,7 @@ class VoiceTurnJournal {
                       lease_until=clock_timestamp() + make_interval(secs => ?), updated_at=CURRENT_TIMESTAMP
                     WHERE run_id=? AND session_id=? AND turn_id=? AND claim_token=?
                     """, decision.acceptedQuoteId(), leaseSeconds, scope.runId(), scope.sessionId(), ticket.turnId(), ticket.token());
-            var accepted = new Ticket(scope, ticket.turnId(), ticket.sequence(), ticket.token(), "ACCEPTED", decision.acceptedQuoteId());
+            var accepted = new Ticket(scope, ticket.turnId(), ticket.sequence(), ticket.token(), "ACCEPTED", decision.acceptedQuoteId(), ticket.nativePickup());
             return new Settlement(accepted, decision.reply(), false);
         });
     }
@@ -151,9 +155,11 @@ class VoiceTurnJournal {
 
     Ticket recover(Scope scope) {
         return transactions.execute(transaction -> {
-            if (!lockRun().equals(scope.runId()) || session(scope, true) == null) return null;
+            if (!lockRun().equals(scope.runId())) return null;
+            var row = session(scope, true);
+            if (row == null) return null;
             TurnRow accepted = pending(scope);
-            return accepted == null ? null : reclaim(scope, accepted);
+            return accepted == null ? null : reclaim(scope, accepted, row.state().nativePickup);
         });
     }
 
@@ -162,20 +168,26 @@ class VoiceTurnJournal {
             UUID run = lockRun();
             db.update("""
                     DELETE FROM voice_sessions s WHERE s.run_id=? AND s.touched_at<CURRENT_TIMESTAMP-INTERVAL '25 minutes'
+                      AND NOT EXISTS (SELECT 1 FROM guest_checkouts g WHERE 'guest:'||g.id::text=s.session_id AND g.run_id=s.run_id
+                                     AND g.expires_at>CURRENT_TIMESTAMP)
                       AND NOT EXISTS (SELECT 1 FROM voice_turns t WHERE t.run_id=s.run_id AND t.session_id=s.session_id
                                      AND t.status IN ('ACCEPTED','UNCERTAIN'))
                     """, run);
+            db.update("""
+                    DELETE FROM guest_checkouts g WHERE g.expires_at<CURRENT_TIMESTAMP
+                      AND NOT EXISTS (SELECT 1 FROM voice_sessions s WHERE 'guest:'||g.id::text=s.session_id AND g.run_id=s.run_id)
+                    """);
         });
     }
 
-    private Ticket reclaim(Scope scope, TurnRow row) {
+    private Ticket reclaim(Scope scope, TurnRow row, boolean nativePickup) {
         UUID token = UUID.randomUUID();
         int matched = db.update("""
                 UPDATE voice_turns SET claim_token=?,lease_until=clock_timestamp() + make_interval(secs => ?),updated_at=CURRENT_TIMESTAMP
                 WHERE run_id=? AND session_id=? AND turn_id=? AND status IN ('PROCESSING','ACCEPTED','UNCERTAIN')
                   AND COALESCE(lease_until,'-infinity')<=clock_timestamp()
                 """, token, leaseSeconds, scope.runId(), scope.sessionId(), row.turnId());
-        return matched == 0 ? null : new Ticket(scope, row.turnId(), row.sequence(), token, row.status(), row.quoteId());
+        return matched == 0 ? null : new Ticket(scope, row.turnId(), row.sequence(), token, row.status(), row.quoteId(), nativePickup);
     }
 
     private TurnRow allowedTicket(Ticket ticket) {
@@ -274,7 +286,7 @@ class VoiceTurnJournal {
     }
 
     record Scope(UUID runId, String sessionId) {}
-    record Ticket(Scope scope, String turnId, int sequence, UUID token, String status, UUID quoteId) {}
+    record Ticket(Scope scope, String turnId, int sequence, UUID token, String status, UUID quoteId, boolean nativePickup) {}
     record Access(Ticket ticket, Session state, boolean ended) {}
     record Settlement(Ticket ticket, Reply reply, boolean ended) {}
     record Decision(Reply reply, UUID acceptedQuoteId, boolean ended, boolean failed) {
@@ -289,12 +301,18 @@ class VoiceTurnJournal {
         Integer grams;
         String unit;
         String pickupTime;
+        Instant pickupAt;
+        VoiceConversation.PickupChoices pickupChoices;
         Quote quote;
+        NativeConfirmation nativeConfirmation;
+        Set<String> usedNativeConfirmationCodes = new HashSet<>();
         SavedOrder order;
         Reply last;
         int silences;
         int unclearTurns;
         boolean hindi = true;
         boolean languageChosen;
+        boolean nativePickup;
     }
+    record NativeConfirmation(UUID quoteId, String code) {}
 }

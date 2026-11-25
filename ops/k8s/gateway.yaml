@@ -6,6 +6,20 @@ metadata:
 data:
   default.conf: |
     limit_req_zone $binary_remote_addr zone=voice:1m rate=2r/s;
+    limit_req_zone $binary_remote_addr zone=owner_auth:1m rate=12r/m;
+    limit_req_zone $binary_remote_addr zone=owner_demo:1m rate=12r/m;
+    limit_req_zone $binary_remote_addr zone=owner_api:1m rate=45r/m;
+    map $request_method $read_method {
+      default 0;
+      GET 1;
+      HEAD 1;
+    }
+    map $request_method $owner_resource_method {
+      default 0;
+      GET 1;
+      HEAD 1;
+      POST 1;
+    }
     server {
       listen 8080;
       server_tokens off;
@@ -19,27 +33,76 @@ data:
       proxy_set_header X-Forwarded-Proto https;
       proxy_set_header X-Forwarded-Port 443;
       proxy_set_header X-Forwarded-Prefix "";
+      proxy_set_header X-Forwarded-For $remote_addr;
+      proxy_set_header X-Staff-Token "";
+      proxy_set_header X-Booking-Token "";
+      proxy_set_header X-Rush-Public-Edge 1;
       add_header X-Content-Type-Options nosniff always;
       add_header Permissions-Policy "microphone=(self), camera=()" always;
+      limit_req_status 429;
 
-      location = /caller {
-        if ($request_method != GET) { return 405; }
+      location = / {
+        if ($read_method = 0) { return 405; }
         proxy_pass http://rush-promise-web:8080;
       }
-      location = /voice-ui/caller.css {
-        if ($request_method != GET) { return 405; }
+      location ~ "^/(?:caller|owner(?:/desk)?|voice-ui/caller[.](?:css|js)|owner-ui/(?:(?:owner|pickup-hours)[.](?:css|js)|phone-notifications[.]js)|staff-ui/staff[.](?:css|js)|home-ui/(?:home[.](?:css|js)|(?:mithai-pickup|brownie)[.]webp))$" {
+        if ($read_method = 0) { return 405; }
         proxy_pass http://rush-promise-web:8080;
       }
-      location = /voice-ui/caller.js {
-        if ($request_method != GET) { return 405; }
+      location ~ "^/api/public/(?:site|shops)$" {
+        if ($read_method = 0) { return 405; }
         proxy_pass http://rush-promise-web:8080;
       }
-      location = /api/storefront/deepak-mithai-bhandar {
-        if ($request_method != GET) { return 405; }
+      location ~ "^/api/storefront/(?-i:(?=[a-z0-9-]{1,55}$)[a-z0-9]+(?:-[a-z0-9]+)*)$" {
+        if ($read_method = 0) { return 405; }
         proxy_pass http://rush-promise-web:8080;
       }
-      location = /api/storefront/virajs-bakery {
+      location ~ "^/api/auth/(?:options|session)$" {
+        if ($read_method = 0) { return 405; }
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location ~ "^/api/auth/(?:signup|login)$" {
+        if ($request_method != POST) { return 405; }
+        client_max_body_size 16k;
+        limit_req zone=owner_auth burst=12 nodelay;
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location = /api/auth/demo {
+        if ($request_method != POST) { return 405; }
+        client_max_body_size 16k;
+        limit_req zone=owner_demo burst=12 nodelay;
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location ~ "^/(?:api/auth/logout|api/owner/(?:shop(?:/settings)?|phone/access|whatsapp/(?:link|unlink)))$" {
+        if ($request_method != POST) { return 405; }
+        client_max_body_size 32k;
+        limit_req zone=owner_api burst=16 nodelay;
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location ~ "^/api/owner/(?:products|pickup-hours)$" {
+        if ($owner_resource_method = 0) { return 405; }
+        client_max_body_size 32k;
+        limit_req zone=owner_api burst=16 nodelay;
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location = /api/owner/whatsapp {
+        if ($read_method = 0) { return 405; }
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location ~ "^/api/(?:staff/(?:session|snapshot)|availability/next|policy/(?:saved-comparisons|pickup-options)|shop/profile)$" {
+        if ($read_method = 0) { return 405; }
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location = /api/events {
         if ($request_method != GET) { return 405; }
+        proxy_buffering off;
+        proxy_read_timeout 75s;
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location ~ "^/api/(?:orders/[1-9][0-9]{0,18}/(?:pack|short|return|approve|reject|cancel)|batches/[a-zA-Z0-9._:-]{1,160}/(?:ready|unblock))$" {
+        if ($request_method != POST) { return 405; }
+        client_max_body_size 32k;
+        limit_req zone=owner_api burst=16 nodelay;
         proxy_pass http://rush-promise-web:8080;
       }
       location = /api/voice/browser/turn {
@@ -47,9 +110,22 @@ data:
         limit_req zone=voice burst=5 nodelay;
         proxy_pass http://rush-promise-web:8080;
       }
-      location = /api/voice/sarvam/turn {
+      location ~ "^/api/checkout/(?:text|guest)$" {
         if ($request_method != POST) { return 405; }
+        client_max_body_size 16k;
         limit_req zone=voice burst=5 nodelay;
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location ~ "^/api/voice/sarvam/(?:turn|owner)$" {
+        if ($request_method != POST) { return 405; }
+        client_max_body_size 32k;
+        limit_req zone=voice burst=5 nodelay;
+        proxy_pass http://rush-promise-web:8080;
+      }
+      location = /api/twilio/owner-link {
+        if ($request_method != POST) { return 405; }
+        client_max_body_size 32k;
+        limit_req zone=owner_api burst=16 nodelay;
         proxy_pass http://rush-promise-web:8080;
       }
       location = /webhooks/twilio/status {

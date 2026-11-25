@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#faf7f0">
+  <meta name="description" content="Take pickup orders by voice. Set your stock and pickup hours, and let customers order by phone or online.">
+  <title>Rush Promise · Voice pickup orders</title>
+  <link rel="canonical" href="https://rush-promise.udit-gupta.com/">
+  <link rel="stylesheet" href="/home-ui/home.css?v=20261125-4">
+  <script defer src="/home-ui/home.js?v=20261125-4"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-top shell">
+    <a href="/" class="brand" aria-label="Rush Promise home"><span class="brand-mark" aria-hidden="true">☎</span>Rush Promise</a>
+    <nav aria-label="Main">
+      <a class="nav-demo" href="#live-demo">Live demo</a>
+      <a class="nav-signin" href="/owner">Sign in</a>
+    </nav>
+  </header>
+  <main id="main">
+    <section class="hero" aria-label="Voice pickup orders">
+      <div class="hero-inner shell">
+        <div class="hero-copy">
+          <h1>Take orders by voice.<br>Make <span>pickup easy.</span></h1>
+          <p>Let customers call or order online. Set your stock and pickup hours from one counter.</p>
+          <div class="hero-actions">
+            <a id="create-store" class="button primary" href="/owner#signup"><span>Create your store</span><span aria-hidden="true">→</span></a>
+            <a class="button quiet" href="#live-demo">Try the live demo</a>
+          </div>
+        </div>
+        <figure class="hero-image">
+          <img src="/home-ui/mithai-pickup.webp?v=20261125-2" alt="A box of barfi with a pickup ticket for 250 grams at 6:00 PM" width="1152" height="768" fetchpriority="high">
+        </figure>
+      </div>
+    </section>
+    <section id="live-demo" class="demo shell" aria-labelledby="demo-title">
+      <div class="demo-header">
+        <h2 id="demo-title">Try the live demo</h2>
+        <a id="demo-phone" class="call-link" hidden></a>
+        <p id="home-voice-status" class="voice-status" hidden>Demo phone ordering is temporarily unavailable.</p>
+      </div>
+      <p id="shared-line-instruction" class="line-instruction" hidden>Shops share one line. Say the shop name when connected.</p>
+      <ul class="store-list">
+        <li class="store-card">
+          <a class="store-call" data-shop-call aria-label="Call Deepak Mithai Bhandar">
+            <span class="store-art mithai" aria-hidden="true"></span>
+            <span class="store-detail"><strong>Deepak Mithai Bhandar</strong><span>Mithai</span></span>
+            <span class="store-action" aria-hidden="true" hidden>Call shop →</span>
+          </a>
+          <a class="store-type" href="/caller?shop=deepak-mithai-bhandar&amp;mode=type" aria-label="Type an order for Deepak Mithai Bhandar">Type an order</a>
+        </li>
+        <li class="store-card">
+          <a class="store-call" data-shop-call aria-label="Call Viraj’s Bakery">
+            <span class="store-art bakery" aria-hidden="true"></span>
+            <span class="store-detail"><strong>Viraj’s Bakery</strong><span>Bakery</span></span>
+            <span class="store-action" aria-hidden="true" hidden>Call shop →</span>
+          </a>
+          <a class="store-type" href="/caller?shop=virajs-bakery&amp;mode=type" aria-label="Type an order for Viraj’s Bakery">Type an order</a>
+        </li>
+      </ul>
+      <details class="directory">
+        <summary>Find another shop</summary>
+        <form id="shop-search" class="search" role="search" aria-label="Find a shop">
+          <label for="shop-query">Shop name or area</label>
+          <div class="search-controls">
+            <input id="shop-query" name="query" type="search" maxlength="80" enterkeyhint="search" placeholder="e.g. bakery" required>
+            <button class="button quiet" type="submit">Search</button>
+          </div>
+        </form>
+        <p id="shop-status" class="search-status" role="status"></p>
+        <ul id="shop-results" class="store-list" aria-label="Matching shops"></ul>
+      </details>
+    </section>
+  </main>
+</body>
+</html>

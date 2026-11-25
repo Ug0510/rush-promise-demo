@@ -118,14 +118,20 @@ class VoiceJournalPostgresTest {
         assertThat(english.quote().id()).isEqualTo(initial.id());
         var quoteAgain = restarted().turn(input(3, initial.id()),
                 () -> new SarvamSpeech.Transcript("yes, what is the price of 500 grams of kaju katli?", "hi-IN"));
-        assertThat(quoteAgain.replyText()).contains("600 rupees").contains("Say yes");
+        assertThat(quoteAgain.replyText()).contains("₹600");
+        assertThat(quoteAgain.state()).isEqualTo("INFORMATION");
+        assertThat(quoteAgain.confirmationToken()).isEmpty();
         assertThat(quoteAgain.language()).isEqualTo("en-IN");
         assertThat(quoteAgain.quote().id()).isEqualTo(initial.id());
         var catalog = speak(4, initial.id(), "What sweets do you have?");
         assertThat(catalog.quote().id()).isEqualTo(initial.id());
         assertThat(catalog.replyText()).contains("Kaju katli").contains("Barfi");
         assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
-        var finalYes = speak(5, initial.id(), "yes");
+        var reissued = speak(5, initial.id(), "yes");
+        assertThat(reissued.state()).isEqualTo("AWAITING_CONFIRMATION");
+        assertThat(reissued.confirmationToken()).isEqualTo(initial.id().toString());
+        assertThat(count("SELECT COUNT(*) FROM orders")).isZero();
+        var finalYes = speak(6, initial.id(), "yes");
         assertThat(finalYes.order().status()).isEqualTo("CONFIRMED");
         assertThat(finalYes.language()).isEqualTo("en-IN");
     }

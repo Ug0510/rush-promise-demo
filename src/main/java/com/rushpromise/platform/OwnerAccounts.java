@@ -1,10 +1,12 @@
 package com.rushpromise.platform;
 
 import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import javax.crypto.SecretKeyFactory;
@@ -23,6 +25,7 @@ import java.util.UUID;
 class OwnerAccounts {
     static final String COOKIE = "rush_owner";
     static final Duration SESSION_TTL = Duration.ofHours(8);
+    static final Duration PREVIEW_TTL = Duration.ofHours(2);
     private static final int ITERATIONS = 600_000;
     private static final Base64.Encoder ENCODE = Base64.getUrlEncoder().withoutPadding();
     private static final Base64.Decoder DECODE = Base64.getUrlDecoder();
@@ -30,22 +33,31 @@ class OwnerAccounts {
     private final JdbcTemplate db;
     private final TenantDirectory tenants;
     private final String dummy;
+    private final int maxAccounts;
 
-    OwnerAccounts(JdbcTemplate db, TenantDirectory tenants) {
+    OwnerAccounts(JdbcTemplate db, TenantDirectory tenants, @Value("${RUSH_MAX_OWNER_ACCOUNTS:30}") int maxAccounts) {
+        if (maxAccounts < 2 || maxAccounts > 1000) throw new IllegalArgumentException("Use an owner account limit from 2 to 1,000");
         this.db = db;
         this.tenants = tenants;
         this.dummy = hashPassword(randomToken(24));
+        this.maxAccounts = maxAccounts;
     }
 
-    Grant signup(Credentials input) {
+    @Transactional
+    public Grant signup(Credentials input) {
         String username = username(input.username());
         String password = input.password();
         if (password == null || password.length() < 12 || password.length() > 128) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Use a password of 12 to 128 characters");
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Password must contain 12 to 128 characters");
+        }
+        String passwordHash = hashPassword(password);
+        db.execute("SELECT pg_advisory_xact_lock(24938439)");
+        if (accountCount() >= maxAccounts) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Registration has reached its current limit");
         }
         try {
             UUID id = db.queryForObject("INSERT INTO public.rush_accounts (username,password_hash) VALUES (?,?) RETURNING id",
-                    UUID.class, username, hashPassword(password));
+                    UUID.class, username, passwordHash);
             return grant(id, username);
         } catch (DuplicateKeyException duplicate) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Choose a different username");
@@ -55,7 +67,7 @@ class OwnerAccounts {
     Grant login(Credentials input) {
         String username = username(input.username());
         String password = input.password();
-        Account account = db.query("SELECT id, password_hash FROM public.rush_accounts WHERE username=?",
+        Account account = db.query("SELECT id, password_hash FROM public.rush_accounts WHERE username=? AND preview_expires_at IS NULL",
                 (row, index) -> new Account(row.getObject("id", UUID.class), row.getString("password_hash")), username)
                 .stream().findFirst().orElse(null);
         if (password == null || password.length() > 128 || !matchesPassword(password, account == null ? dummy : account.hash()) || account == null) {
@@ -67,12 +79,14 @@ class OwnerAccounts {
     Principal resolve(String token) {
         if (token == null || !token.matches("[A-Za-z0-9_-]{43}")) return null;
         var principal = db.query("""
-                SELECT a.id,a.username,s.csrf_token FROM public.rush_web_sessions s
+                SELECT a.id,a.username,s.csrf_token,a.preview_expires_at IS NOT NULL AS preview FROM public.rush_web_sessions s
                 JOIN public.rush_accounts a ON a.id=s.account_id WHERE s.token_hash=?
                   AND s.revoked_at IS NULL AND s.expires_at>statement_timestamp()
+                  AND (a.preview_expires_at IS NULL OR a.preview_expires_at>statement_timestamp())
                 """, (row, index) -> new Principal(row.getObject("id", UUID.class), row.getString("username"),
-                    row.getString("csrf_token"), null), tokenHash(token)).stream().findFirst().orElse(null);
-        return principal == null ? null : new Principal(principal.accountId(), principal.username(), principal.csrf(), tenants.forOwner(principal.accountId()));
+                    row.getString("csrf_token"), null, row.getBoolean("preview")), tokenHash(token)).stream().findFirst().orElse(null);
+        return principal == null ? null : new Principal(principal.accountId(), principal.username(), principal.csrf(),
+                tenants.forOwner(principal.accountId()), principal.demoPreview());
     }
 
     void revoke(String token) {
@@ -82,11 +96,36 @@ class OwnerAccounts {
     }
 
     private Grant grant(UUID id, String username) {
+        return grant(id,username,false);
+    }
+
+    Grant grantPreview(UUID id) { return grant(id,"Demo owner",true); }
+
+    private Grant grant(UUID id, String username, boolean preview) {
         String token = randomToken(32);
         String csrf = randomToken(24);
         db.update("INSERT INTO public.rush_web_sessions (token_hash,account_id,csrf_token,expires_at) VALUES (?,?,?,statement_timestamp()+make_interval(secs => ?))",
-                tokenHash(token), id, csrf, SESSION_TTL.toSeconds());
-        return new Grant(token, new Principal(id, username, csrf, tenants.forOwner(id)));
+                tokenHash(token), id, csrf, (preview ? PREVIEW_TTL : SESSION_TTL).toSeconds());
+        return new Grant(token, new Principal(id, username, csrf, tenants.forOwner(id),preview));
+    }
+
+    @Transactional
+    public UUID reservePreview(UUID key) {
+        if (key == null || key.version() != 4) throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Start again from the demo button");
+        db.execute("SELECT pg_advisory_xact_lock(24938440)");
+        String hash = tokenHash(key.toString());
+        var previous = db.query("SELECT id FROM public.rush_accounts WHERE preview_key_hash=? AND preview_expires_at>statement_timestamp()",
+                (row,index)->row.getObject(1,UUID.class),hash).stream().findFirst().orElse(null);
+        if (previous != null) return previous;
+        Integer active = db.queryForObject("SELECT count(*) FROM public.rush_accounts WHERE preview_expires_at IS NOT NULL",Integer.class);
+        if (active != null && active >= 12) throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Demo shops are busy. Try again in a few minutes.");
+        db.update("UPDATE public.rush_accounts SET preview_key_hash=NULL WHERE preview_key_hash=? AND preview_expires_at<=statement_timestamp()",hash);
+        UUID id = UUID.randomUUID();
+        db.update("""
+                INSERT INTO public.rush_accounts(id,username,password_hash,preview_key_hash,preview_expires_at)
+                VALUES (?,?,'preview-disabled',?,statement_timestamp()+make_interval(secs=>?))
+                """,id,"preview-"+id.toString().replace("-",""),hash,PREVIEW_TTL.toSeconds());
+        return id;
     }
 
     UUID ensureDemoAccount(Credentials input) {
@@ -106,7 +145,7 @@ class OwnerAccounts {
     }
 
     int accountCount() {
-        return db.queryForObject("SELECT COUNT(*) FROM public.rush_accounts", Integer.class);
+        return db.queryForObject("SELECT COUNT(*) FROM public.rush_accounts WHERE preview_expires_at IS NULL", Integer.class);
     }
 
     String issueNativeToken(TenantDirectory.Shop shop) {
@@ -133,13 +172,13 @@ class OwnerAccounts {
         return ENCODE.encodeToString(token);
     }
 
-    private String hashPassword(String password) {
+    String hashPassword(String password) {
         byte[] salt = new byte[16];
         random.nextBytes(salt);
         return "pbkdf2-sha256$" + ITERATIONS + "$" + ENCODE.encodeToString(salt) + "$" + ENCODE.encodeToString(derive(password, salt, ITERATIONS));
     }
 
-    private static boolean matchesPassword(String password, String encoded) {
+    static boolean matchesPassword(String password, String encoded) {
         String[] split = encoded.split("\\$");
         return MessageDigest.isEqual(DECODE.decode(split[3]), derive(password, DECODE.decode(split[2]), Integer.parseInt(split[1])));
     }
@@ -159,16 +198,16 @@ class OwnerAccounts {
     private static String username(String raw) {
         String value = raw == null ? "" : raw.strip().toLowerCase(Locale.ROOT);
         if (!value.matches("[a-z0-9][a-z0-9._-]{2,39}")) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Use 3 to 40 letters, digits, periods, underscores or hyphens for the username");
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Username must contain 3 to 40 letters, digits, periods, underscores or hyphens and start with a letter or digit");
         }
         return value;
     }
 
     record Credentials(String username, String password) {}
     record Grant(String token, Principal principal) {}
-    record Principal(UUID accountId, String username, String csrf, TenantDirectory.Shop shop) {
-        SessionView view() { return new SessionView(username, shop == null ? null : shop.view(), csrf); }
+    record Principal(UUID accountId, String username, String csrf, TenantDirectory.Shop shop, boolean demoPreview) {
+        SessionView view() { return new SessionView(demoPreview ? "Demo owner" : username, shop == null ? null : shop.view(), csrf, demoPreview); }
     }
-    record SessionView(String username, TenantDirectory.ShopView shop, String csrfToken) {}
+    record SessionView(String username, TenantDirectory.ShopView shop, String csrfToken, boolean demoPreview) {}
     private record Account(UUID id, String hash) {}
 }

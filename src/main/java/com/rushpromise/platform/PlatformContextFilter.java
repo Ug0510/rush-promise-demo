@@ -8,10 +8,13 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 
@@ -43,8 +46,13 @@ public class PlatformContextFilter extends OncePerRequestFilter {
             }
             return;
         }
+        if (get && (path.equals("/api/public/shops") || path.equals("/api/public/site"))) {
+            chain.doFilter(request, response);
+            return;
+        }
         String buyerSlug = request.getHeader("X-Rush-Shop");
-        if (path.equals("/api/voice/browser/turn") && buyerSlug != null) {
+        if (path.equals("/api/checkout/text") || path.equals("/api/checkout/guest")
+                || (path.equals("/api/voice/browser/turn") && buyerSlug != null)) {
             var shop = tenants.bySlug(buyerSlug);
             if (shop == null) response.sendError(HttpServletResponse.SC_NOT_FOUND);
             else proceed(shop.schema(), request, response, chain);
@@ -65,6 +73,17 @@ public class PlatformContextFilter extends OncePerRequestFilter {
             else chain.doFilter(request, response);
             return;
         }
+        if (path.equals("/api/voice/sarvam/owner")) {
+            chain.doFilter(request,response);
+            return;
+        }
+        if (get && path.equals("/owner/desk")) {
+            var owner = accounts.resolve(cookie(request));
+            if (owner != null) request.setAttribute(PRINCIPAL, owner);
+            response.setHeader("Cache-Control", "no-store");
+            chain.doFilter(request, response);
+            return;
+        }
         if (!path.startsWith("/api/") && !path.startsWith("/ops/")) {
             chain.doFilter(request, response);
             return;
@@ -79,8 +98,14 @@ public class PlatformContextFilter extends OncePerRequestFilter {
             return;
         }
         request.setAttribute(PRINCIPAL, principal);
-        boolean publicAuth = path.equals("/api/auth/signup") || path.equals("/api/auth/login");
+        boolean publicAuth = path.equals("/api/auth/signup") || path.equals("/api/auth/login") || path.equals("/api/auth/demo");
         if (!get && !publicAuth && !equal(principal.csrf(), request.getHeader("X-CSRF-Token"))) {
+            response.sendError(HttpServletResponse.SC_FORBIDDEN);
+            return;
+        }
+        if (principal.demoPreview() && (path.startsWith("/api/owner/phone/") || path.startsWith("/api/owner/whatsapp")
+                || path.equals("/api/owner/shop/native-token") || path.startsWith("/api/quotes")
+                || path.startsWith("/api/sim/") || path.startsWith("/ops/"))) {
             response.sendError(HttpServletResponse.SC_FORBIDDEN);
             return;
         }
@@ -114,6 +139,21 @@ public class PlatformContextFilter extends OncePerRequestFilter {
     public static boolean ownerHasShop(HttpServletRequest request) {
         var principal = principal(request);
         return principal != null && principal.shop() != null;
+    }
+
+    public static void requireSameOrigin(HttpServletRequest request) {
+        if ("cross-site".equals(request.getHeader("Sec-Fetch-Site"))) throw new ResponseStatusException(HttpStatus.FORBIDDEN);
+        String origin = request.getHeader("Origin");
+        if (origin == null) return;
+        try {
+            URI host = URI.create(origin);
+            int port = host.getPort() == -1 ? ("https".equals(host.getScheme()) ? 443 : 80) : host.getPort();
+            if (request.getScheme().equalsIgnoreCase(host.getScheme()) && request.getServerName().equalsIgnoreCase(host.getHost())
+                    && request.getServerPort() == port) return;
+        } catch (IllegalArgumentException ignored) {
+            // Reject malformed and mismatched origins the same way.
+        }
+        throw new ResponseStatusException(HttpStatus.FORBIDDEN);
     }
 
     static boolean equal(String expected, String actual) {

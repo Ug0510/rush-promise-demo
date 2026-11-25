@@ -20,8 +20,9 @@ class NotificationWorker {
     private final DeliverySettings settings;
     private final TwilioWhatsApp provider;
     private final TenantDirectory tenants;
+    private final OwnerWhatsApp owners;
 
-    NotificationWorker(OutboxRepository outbox, DeliverySettings settings, ObjectMapper json, TenantDirectory tenants,
+    NotificationWorker(OutboxRepository outbox, DeliverySettings settings, ObjectMapper json, TenantDirectory tenants, OwnerWhatsApp owners,
                        @Value("${RUSH_WORKER_BOOT:ready}") String boot) {
         if (!boot.equals("ready")) {
             throw new IllegalStateException("Worker startup blocked by this isolated demo revision");
@@ -29,6 +30,7 @@ class NotificationWorker {
         this.outbox = outbox;
         this.settings = settings;
         this.tenants = tenants;
+        this.owners = owners;
         if (settings.live()) {
             settings.requireLiveConfiguration();
         }
@@ -38,6 +40,12 @@ class NotificationWorker {
     @Scheduled(fixedDelayString = "${RUSH_WORKER_POLL_MS:750}")
     void poll() {
         forEachQueue(this::deliverOne);
+        if (provider == null || !owners.enabled()) return;
+        var dispatch = owners.claim();
+        if (dispatch == null) return;
+        var result = owners.stillPermitted(dispatch) ? provider.sendOwner(dispatch)
+            : new DeliveryResult("SUPPRESSED", null, "OWNER_WINDOW_CLOSED");
+        owners.observe(dispatch.attemptId(), result);
     }
 
     private void deliverOne() {
@@ -64,6 +72,7 @@ class NotificationWorker {
     @Scheduled(fixedDelay = 5000)
     void recover() {
         forEachQueue(outbox::recoverLeases);
+        if (owners.enabled()) owners.recover();
     }
 
     private void forEachQueue(Runnable task) {

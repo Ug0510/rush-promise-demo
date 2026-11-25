@@ -39,12 +39,16 @@ public class SarvamShopRouting {
     }
 
     public Route choose(String interaction, String slug) {
-        if (slug == null || !SHOPS.contains(slug)) return null;
         var shop = tenants.bySlug(slug);
         if (shop == null) return null;
         db.update("INSERT INTO public.sarvam_shop_routes (call_hash,tenant_id) VALUES (?,?) ON CONFLICT DO NOTHING",
                 digest(interaction), shop.id());
         return route(interaction);
+    }
+
+    public List<Choice> resolveName(String spokenName) {
+        return tenants.exactVoiceChoices(spokenName).stream()
+                .map(shop -> new Choice(shop.slug(), shop.displayName(), shop.area())).toList();
     }
 
     @Scheduled(fixedDelay = 3_600_000)
@@ -60,6 +64,9 @@ public class SarvamShopRouting {
         }
     }
 
-    public record Choice(String slug, String displayName) {}
+    public record Choice(String slug, String displayName, String area) {
+        public Choice(String slug, String displayName) { this(slug, displayName, null); }
+        public String spokenLabel() { return area == null ? displayName : displayName + ", " + area; }
+    }
     public record Route(String slug, String schema) {}
 }

@@ -25,7 +25,7 @@ class NotificationWorkerTest {
     private final TenantDirectory tenants = mock(TenantDirectory.class);
     private final DeliverySettings settings = new DeliverySettings("twilio", "AC" + "0".repeat(32), "fixture-token",
             "whatsapp:+12025550172", "https://example.test", ENROLLED);
-    private final NotificationWorker worker = new NotificationWorker(outbox, settings, new ObjectMapper(), tenants, "ready");
+    private final NotificationWorker worker = new NotificationWorker(outbox, settings, new ObjectMapper(), tenants, mock(OwnerWhatsApp.class), "ready");
 
     @Test
     void registeredShopsAreSimulatedEvenWithLegacyTwilioEnabled() {

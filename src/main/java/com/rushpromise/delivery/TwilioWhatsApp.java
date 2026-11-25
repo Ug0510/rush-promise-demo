@@ -36,6 +36,17 @@ final class TwilioWhatsApp {
             || !(dispatch.kind().equals("CONFIRMED") || dispatch.kind().equals("READY"))) {
             throw new IllegalArgumentException("Dispatch outside the authorized handset and message kinds");
         }
+        return sendMessage(dispatch);
+    }
+
+    DeliveryResult sendOwner(OutboxRepository.Dispatch dispatch) {
+        if (!"NEW_ORDER".equals(dispatch.kind()) || !dispatch.recipient().matches("\\+[1-9][0-9]{7,14}")) {
+            throw new IllegalArgumentException("Invalid verified owner dispatch");
+        }
+        return sendMessage(dispatch);
+    }
+
+    private DeliveryResult sendMessage(OutboxRepository.Dispatch dispatch) {
         String credentials = settings.accountSid() + ":" + settings.authToken();
         String auth = Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
         String form = "From=" + encode(settings.from()) + "&To=" + encode("whatsapp:" + dispatch.recipient())

@@ -8,9 +8,10 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.text.Normalizer;
+import java.time.Instant;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
@@ -20,6 +21,7 @@ import static com.rushpromise.booking.BookingModels.*;
 @Component
 @Profile("!worker")
 class VoiceConversation {
+    private static final ZoneId SHOP_ZONE = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH);
     private static final List<String> HINDI_HOURS = List.of("बारह", "एक", "दो", "तीन", "चार", "पाँच", "छह", "सात", "आठ", "नौ", "दस", "ग्यारह");
     private static final Pattern ENGLISH_REQUEST = Pattern.compile(
@@ -32,10 +34,13 @@ class VoiceConversation {
     private static final List<String> MENU = List.of("what sweets", "what can i order", "what do you have", "which sweets", "list sweets",
             "menu", "do you have", "have any", "available sweets", "kya kya", "kya mil", "sweet options", "मेन्यू",
             "क्या क्या", "क्या है", "कौन सी मिठाई", "कौन कौन सी", "क्या मिलेगा", "क्या मिलता", "विकल्प");
+    private static final List<String> HOURS = List.of("opening hours", "business hours", "store hours", "pickup hours", "when are you open",
+            "दुकान कब खुलती है", "दुकान कब बंद होती है", "पिकअप के घंटे", "खुलने का समय", "बंद होने का समय");
     private static final List<String> PICKUP = List.of("when can", "pickup options", "pickup times", "what time can", "what times",
             "which time", "pickup available", "available at", "earliest", "kab milega", "kab le", "pickup kab", "कब मिलेगा",
             "कब ले", "पिकअप कब", "किस समय", "कौन सा समय", "और कोई टाइम", "कितने बजे मिल", "बजे मिल सकता");
     private static final Pattern HAS_WEIGHT = Pattern.compile("(?:क्या|can i|could i|is there).*(?:मिल सक|available|in stock)");
+    private static final Pattern EXACT_GRAMS = Pattern.compile("^(?:सिर्फ़?|केवल|only|exactly) [\\p{L}\\p{M}\\p{N}]+ (?:ग्राम|grams?|g)(?: चाहिए| please)?$");
     private static final List<String> AMOUNT = List.of("which sizes", "what sizes", "what weights", "how many grams", "how much is available",
             "how much can i get", "quantity available", "which quantities", "kitna milega", "कितना मिल सकता", "कितना मिलेगा",
             "कौन से वज़न", "कौन से वजन", "कितना स्टॉक", "कितनी मात्रा", "वज़न उपलब्ध", "वजन उपलब्ध");
@@ -67,17 +72,56 @@ class VoiceConversation {
         String language = ENGLISH_REQUEST.matcher(text).find() ? "en-IN"
                 : HINDI_REQUEST.matcher(text).find() ? "hi-IN" : null;
         var parsed = SpeechIntent.parse(spoken);
-        Kind kind = has(text, PICKUP) ? Kind.PICKUP : has(text, AMOUNT) || HAS_WEIGHT.matcher(text).find() ? Kind.AMOUNT
+        Kind kind = has(text, HOURS) ? Kind.HOURS : has(text, PICKUP) ? Kind.PICKUP : has(text, AMOUNT) || HAS_WEIGHT.matcher(text).find() ? Kind.AMOUNT
                 : has(text, PRICE) ? Kind.PRICE : has(text, MENU) ? Kind.MENU
                 : language != null && parsed.decision() != SpeechIntent.Decision.ORDER ? Kind.LANGUAGE : Kind.BOOKING;
         return new Query(kind, language, parsed.sku(), parsed.grams(), parsed.pickupTime(), spoken);
     }
 
+    VoiceSessionService.Reply previewWithoutIdentity(String spoken, String defaultLanguage) {
+        var question = classify(spoken);
+        String language = question.language() == null ? defaultLanguage : question.language();
+        boolean hindi = "hi-IN".equals(language);
+        if (question.kind() != Kind.BOOKING) {
+            return informational("INFORMATION", answer(question, hindi, null, null), language);
+        }
+        var words = orderWords(spoken, null);
+        var intent = words.parsed();
+        if (words.ambiguousWeight()) {
+            return informational("CLARIFY_QUANTITY", weightClarification(intent.grams(), hindi), language);
+        }
+        if (intent.decision() == SpeechIntent.Decision.YES) {
+            return informational("PREVIEW_ONLY", hindi ? "बुकिंग अभी नहीं हुई। मैं कीमत और समय बता सकता हूँ। बुकिंग के लिए Rush Promise में इस दुकान का वॉइस चेकआउट खोलें।"
+                    : "Nothing was booked. I can still check prices and pickup times. To book, open this shop’s voice checkout in Rush Promise.", language);
+        }
+        if (intent.sku() != null && intent.grams() != null && intent.pickupTime() != null) {
+            var offer = booking.previewPickup(intent.sku(), intent.grams(), intent.pickupTime());
+            if (offer != null) {
+                Instant now = booking.currentShopTime();
+                String text = hindi ? amount(offer.quantity(), offer.unit(), true) + " " + spokenItem(offer.itemName(), true)
+                        + ", " + money(offer.pricePaise()) + " रुपये। " + pickupLabel(offer.pickupTime(), offer.pickupAt(), now, true)
+                        + " पिकअप मिल सकता है।" + (offer.requiresApproval() ? " इसके लिए दुकान की मंज़ूरी चाहिए।" : "")
+                        : amount(offer.quantity(), offer.unit(), false) + " of " + offer.itemName() + " costs "
+                        + money(offer.pricePaise()) + " rupees. Pickup may be available " + pickupLabel(offer.pickupTime(), offer.pickupAt(), now, false) + "."
+                        + (offer.requiresApproval() ? " This needs shop approval." : "");
+                return informational("PREVIEW_ONLY", text, language);
+            }
+        }
+        String help = hindi ? "मैं कीमत, स्टॉक और पिकअप का समय बता सकता हूँ। मिठाई, मात्रा और समय बताइए। "
+                : "I can check prices, stock and pickup times. Tell me the item, amount and time. ";
+        return informational("INFORMATION", help + menu(language).replyText(), language);
+    }
+
+    private static VoiceSessionService.Reply informational(String state, String text, String language) {
+        return new VoiceSessionService.Reply(state, "", text, language, null, null);
+    }
+
     OrderWords orderWords(String spoken, String currentSku) {
         var parsed = SpeechIntent.parse(spoken);
+        boolean exactGrams = EXACT_GRAMS.matcher(SpeechIntent.words(spoken)).matches();
         if (TenantContext.legacy() || parsed.decision() == SpeechIntent.Decision.YES
                 || parsed.decision() == SpeechIntent.Decision.NO || parsed.decision() == SpeechIntent.Decision.REPEAT) {
-            return new OrderWords(parsed, "GRAMS", false);
+            return new OrderWords(parsed, "GRAMS", false, exactGrams);
         }
         var items = booking.catalog().items();
         var selected = findItem(items, spoken, parsed.sku());
@@ -88,7 +132,7 @@ class VoiceConversation {
         var decision = sku != null || quantity != null || parsed.pickupTime() != null
                 ? SpeechIntent.Decision.ORDER : SpeechIntent.Decision.UNCLEAR;
         boolean wrongUnit = current != null && "PIECE".equals(unit) && parsed.grams() != null && quantity == null;
-        return new OrderWords(new SpeechIntent.Intent(decision, sku, quantity, parsed.pickupTime()), unit, wrongUnit);
+        return new OrderWords(new SpeechIntent.Intent(decision, sku, quantity, parsed.pickupTime()), unit, wrongUnit, exactGrams);
     }
 
     private static MenuItem findItem(List<MenuItem> items, String spoken, String recognizedSku) {
@@ -123,44 +167,100 @@ class VoiceConversation {
     }
 
     String answer(Query question, boolean hindi, String currentSku, Integer currentGrams) {
+        return answerWithChoices(question, hindi, currentSku, currentGrams).text();
+    }
+
+    Answer answerWithChoices(Query question, boolean hindi, String currentSku, Integer currentGrams) {
         if (question.kind() == Kind.LANGUAGE) {
-            return hindi ? "बिल्कुल, अब हम हिंदी में बात करेंगे।" : "Of course. I’ll continue in English.";
+            return new Answer(hindi ? "अब हिंदी में बात करेंगे।" : "I’ll continue in English.", null);
         }
+        if (question.kind() == Kind.HOURS) return new Answer(hours(hindi), null);
         ShopMenu menu = booking.catalog();
         MenuItem requestedItem = findItem(menu.items(), question.spoken(), question.sku());
         MenuItem item = requestedItem == null ? bySku(menu.items(), currentSku) : requestedItem;
-        if (question.kind() == Kind.MENU || item == null) {
-            return listMenu(requestedItem == null ? menu.items() : List.of(requestedItem), hindi);
+        if (question.kind() == Kind.MENU) {
+            return new Answer(listMenu(requestedItem == null ? menu.items() : List.of(requestedItem), hindi), null);
         }
+        if (item == null) return new Answer(hindi ? "किस मिठाई के लिए?" : "Which item?", null);
         boolean pieces = "PIECE".equals(item.unit());
         Integer requested = pieces ? pieceCount(question.spoken(), item) : question.grams();
-        if (question.kind() == Kind.AMOUNT && requested == null) return listMenu(List.of(item), hindi);
-        if (question.kind() == Kind.PRICE && requested == null) {
-            String price = money(item.pricePerUnitPaise());
-            return hindi ? itemName(item, true) + " " + price + (pieces ? " रुपये प्रति पीस है। " : " रुपये प्रति किलो है। ")
-                    + listMenu(List.of(item), true)
-                    : item.itemName() + " costs " + price + (pieces ? " rupees per piece. " : " rupees per kilo. ")
-                    + listMenu(List.of(item), false);
+        if (question.kind() == Kind.PRICE) {
+            String name = itemName(item, hindi);
+            if (requested == null) {
+                String unitPrice = money(item.pricePerUnitPaise());
+                return new Answer(hindi ? name + " " + unitPrice + (pieces ? " रुपये प्रति पीस।" : " रुपये प्रति किलो।")
+                        : name + " is ₹" + unitPrice + (pieces ? " per piece." : " per kilo."), null);
+            }
+            String price = money((long) item.pricePerUnitPaise() * requested / (pieces ? 1 : 1000));
+            return new Answer(hindi ? amount(requested, item.unit(), true) + " " + name + ", " + price + " रुपये।"
+                    : amount(requested, item.unit(), false) + " of " + name + " is ₹" + price + ".", null);
+        }
+        if (question.kind() == Kind.AMOUNT && requested == null) {
+            List<String> portions = item.portions().stream().filter(VoiceConversation::availablePortion)
+                    .map(portion -> amount(portion.quantity(), portion.unit(), hindi)).limit(3).toList();
+            if (portions.isEmpty()) return new Answer(hindi ? "यह अभी उपलब्ध नहीं है।" : "This item is currently unavailable.", null);
+            return new Answer(String.join(hindi ? " या " : " or ", portions) + (hindi ? " उपलब्ध है।" : " available."), null);
+        }
+        if (question.kind() == Kind.AMOUNT) {
+            boolean available = !booking.availablePickups(item.sku(), requested, null, 1).isEmpty();
+            String size = amount(requested, item.unit(), hindi);
+            return new Answer(hindi ? size + (available ? " उपलब्ध है।" : " अभी उपलब्ध नहीं है।")
+                    : size + (available ? " is available." : " is currently unavailable."), null);
         }
         int quantity = requested != null ? requested : requestedItem == null && currentGrams != null ? currentGrams : pieces ? 1 : 500;
-        Availability readback = booking.nextAvailability(item.sku(), quantity, question.pickupTime());
-        if (readback.option() == null) {
-            return hindi ? "इस मात्रा के लिए अभी पिकअप नहीं मिल रहा। " + listMenu(List.of(item), true)
-                    : "No pickup is available for that amount. " + listMenu(List.of(item), false);
-        }
-        var option = readback.option();
-        String price = money(Math.toIntExact((long) item.pricePerUnitPaise() * quantity / (pieces ? 1 : 1000)));
-        String pickup = time(option.pickupTime());
-        String name = itemName(item, hindi);
-        return hindi ? amount(quantity, item.unit(), true) + " " + name + " के " + price + " रुपये हैं। "
-                + hindiTime(option.pickupTime()) + " पिकअप मिल सकता है।"
-                : amount(quantity, item.unit(), false) + " of " + name + " costs " + price + " rupees. The earliest eligible pickup is " + pickup + ".";
+        Instant requestedAt = SpeechIntent.tomorrow(question.spoken()) ? requestedTomorrow(question.pickupTime()) : null;
+        return availableTimes(item.sku(), quantity, question.pickupTime(), requestedAt, hindi);
+    }
+
+    Answer availableTimes(String sku, int quantity, String start, Instant requestedAt, boolean hindi) {
+        String effectiveStart = start == null && requestedAt != null ? "00:00" : start;
+        List<PickupPreview> options = booking.availablePickups(sku, quantity, effectiveStart, requestedAt, 3);
+        boolean outside = start != null && outsideHours(start, booking.pickupHours());
+        String prefix = outside ? hours(hindi) + " " : "";
+        if (options.isEmpty()) return new Answer(prefix + (hindi ? "इस मात्रा के लिए अभी पिकअप का समय नहीं है।"
+                : "There’s no pickup time available for that amount."), new PickupChoices(sku, options));
+        Instant now = booking.currentShopTime();
+        var first = options.getFirst();
+        var times = options.stream().map(option -> pickupLabel(option.pickupTime(), option.pickupAt(), now, hindi)).toList();
+        String item = amount(quantity, first.unit(), hindi) + " " + spokenItem(first.itemName(), hindi);
+        String text = hindi ? item + " के लिए " + String.join(" या ", times) + " पिकअप मिल सकता है।"
+                : "For " + item + ", pickup is available " + String.join(", ", times) + ".";
+        return new Answer(prefix + text, new PickupChoices(sku, options));
+    }
+
+    Instant requestedTomorrow(String pickupTime) {
+        var now = booking.currentShopTime().atZone(SHOP_ZONE);
+        var time = pickupTime == null ? LocalTime.MIDNIGHT : LocalTime.parse(pickupTime);
+        return now.toLocalDate().plusDays(1).atTime(time).atZone(SHOP_ZONE).toInstant();
+    }
+
+    String hours(boolean hindi) {
+        var hours = booking.pickupHours();
+        if (hours == null || hours.allDay()) return hindi ? "पिकअप का समय पूरे दिन खुला है।" : "Pickup hours are all day.";
+        return hindi ? "पिकअप का समय " + hindiTime(hours.opensAt()) + " से " + hindiTime(hours.closesAt()) + " तक है।"
+                : "Pickup hours are " + time(hours.opensAt()) + " to " + time(hours.closesAt()) + " IST.";
+    }
+
+    private static boolean outsideHours(String proposed, PickupHours hours) {
+        if (hours == null || hours.allDay()) return false;
+        return proposed.compareTo(hours.opensAt()) < 0 || proposed.compareTo(hours.closesAt()) > 0;
+    }
+
+    static String pickupLabel(String pickupTime, Instant pickupAt, Instant now, boolean hindi) {
+        String clock = hindi ? hindiTime(pickupTime) : time(pickupTime);
+        if (pickupAt == null || now == null) return clock;
+        var day = pickupAt.atZone(SHOP_ZONE).toLocalDate();
+        var currentDay = now.atZone(SHOP_ZONE).toLocalDate();
+        if (day.equals(currentDay)) return clock;
+        if (day.equals(currentDay.plusDays(1))) return hindi ? "कल " + clock : "tomorrow at " + clock;
+        String date = day.format(DateTimeFormatter.ofPattern("d MMMM", hindi ? Locale.forLanguageTag("hi-IN") : Locale.ENGLISH));
+        return hindi ? date + " को " + clock : date + " at " + clock;
     }
 
     static String amount(int count, String unit, boolean hindi) {
         if ("PIECE".equals(unit)) return count + (hindi ? " पीस" : count == 1 ? " piece" : " pieces");
         if (hindi) return switch (count) {
-            case 250 -> "पाव किलो";
+            case 250 -> "ढाई सौ ग्राम";
             case 500 -> "आधा किलो";
             case 1000 -> "एक किलो";
             case 1500 -> "डेढ़ किलो";
@@ -174,26 +274,21 @@ class VoiceConversation {
         return count + " grams";
     }
 
-    private String listMenu(List<MenuItem> items, boolean hindi) {
-        var lines = new ArrayList<String>();
-        for (MenuItem item : items.stream().limit(4).toList()) {
-            var portions = item.portions().stream().filter(portion -> portion.readyPickup() != null || portion.futurePickup() != null)
-                    .limit(3).map(portion -> {
-                        String pickup = portion.readyPickup() == null ? portion.futurePickup()
-                                : portion.futurePickup() == null || portion.readyPickup().compareTo(portion.futurePickup()) <= 0
-                                ? portion.readyPickup() : portion.futurePickup();
-                        boolean future = !pickup.equals(portion.readyPickup());
-                        if (hindi) return amount(portion.quantity(), portion.unit(), true) + " " + money(portion.pricePaise())
-                                + " रुपये, " + (future ? "अगले बैच से " : "") + hindiTime(pickup);
-                        return amount(portion.quantity(), portion.unit(), false) + " for " + money(portion.pricePaise()) + " rupees"
-                                + (future ? " from the next tray at " : ", pickup at ") + time(pickup);
-                    }).toList();
-            if (!portions.isEmpty()) lines.add(itemName(item, hindi) + (hindi ? " के विकल्प। " : " options. ")
-                    + String.join(hindi ? "। " : ". ", portions));
-        }
-        if (lines.isEmpty()) return hindi ? "अभी इस मिठाई का पिकअप उपलब्ध नहीं है।"
-                : "There are no eligible pickups for those sweets right now.";
-        return String.join(hindi ? "। " : ". ", lines) + (hindi ? "।" : ".");
+    static String weightClarification(int grams, boolean hindi) {
+        return hindi ? "मैंने " + grams + " ग्राम सुना। कृपया वज़न और उसकी इकाई फिर बताइए। अगर यही मात्रा है, तो सिर्फ "
+                + grams + " ग्राम कहिए।"
+                : "I heard " + grams + " grams. Please repeat the amount and unit. If that's what you meant, say exactly " + grams + " grams.";
+    }
+
+    private static String listMenu(List<MenuItem> items, boolean hindi) {
+        List<String> names = items.stream().filter(item -> item.portions().stream().anyMatch(VoiceConversation::availablePortion))
+                .map(item -> itemName(item, hindi)).limit(4).toList();
+        if (names.isEmpty()) return hindi ? "अभी पिकअप के लिए कोई आइटम उपलब्ध नहीं है।" : "Nothing is currently available for pickup.";
+        return String.join(hindi ? " और " : ", ", names) + (hindi ? " उपलब्ध है।" : " available.");
+    }
+
+    private static boolean availablePortion(MenuPortion portion) {
+        return portion.readyPickup() != null || portion.futurePickup() != null;
     }
 
     private static boolean has(String text, List<String> choices) {
@@ -222,7 +317,7 @@ class VoiceConversation {
         };
     }
 
-    private static String money(int paise) {
+    private static String money(long paise) {
         return BigDecimal.valueOf(paise, 2).stripTrailingZeros().toPlainString();
     }
 
@@ -245,8 +340,14 @@ class VoiceConversation {
         return period + " " + clock;
     }
 
-    enum Kind { BOOKING, LANGUAGE, MENU, PRICE, AMOUNT, PICKUP }
+    enum Kind { BOOKING, LANGUAGE, MENU, PRICE, AMOUNT, PICKUP, HOURS }
+    record Answer(String text, PickupChoices choices) {}
+    record PickupChoices(String sku, List<PickupPreview> options) {}
     record Query(Kind kind, String language, String sku, Integer grams, String pickupTime, String spoken) {}
-    record OrderWords(SpeechIntent.Intent parsed, String unit, boolean wrongUnit) {}
+    record OrderWords(SpeechIntent.Intent parsed, String unit, boolean wrongUnit, boolean exactGrams) {
+        boolean ambiguousWeight() {
+            return "GRAMS".equals(unit) && parsed.grams() != null && parsed.grams() > 0 && parsed.grams() < 10 && !exactGrams;
+        }
+    }
     record Greeting(String shopName, String language, String replyText) {}
 }

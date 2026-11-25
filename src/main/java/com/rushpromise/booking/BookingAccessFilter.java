@@ -62,7 +62,8 @@ public class BookingAccessFilter extends OncePerRequestFilter {
             return;
         }
         String method = request.getMethod();
-        if (under(path, "/api/auth") || ((method.equals("GET") || method.equals("HEAD")) && under(path, "/api/storefront"))) {
+        if (under(path, "/api/auth") || ((method.equals("GET") || method.equals("HEAD"))
+                && (under(path, "/api/storefront") || path.equals("/api/public/shops") || path.equals("/api/public/site")))) {
             chain.doFilter(request, response);
             return;
         }
@@ -74,11 +75,18 @@ public class BookingAccessFilter extends OncePerRequestFilter {
             }
             return;
         }
-        if (method.equals("POST") && (path.equals("/api/voice/browser/turn") || path.equals("/api/voice/sarvam/turn"))) {
+        if (method.equals("POST") && (path.equals("/api/voice/browser/turn") || path.equals("/api/voice/sarvam/turn")
+                || path.equals("/api/voice/sarvam/owner")
+                || path.equals("/api/checkout/text") || path.equals("/api/checkout/guest")
+                || path.equals(com.rushpromise.delivery.OwnerWhatsApp.INBOUND_PATH))) {
             chain.doFilter(request, response);
             return;
         }
         boolean authenticatedOwner = PlatformContextFilter.ownerAuthenticated(request);
+        if ("1".equals(request.getHeader("X-Rush-Public-Edge")) && !authenticatedOwner) {
+            response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
+            return;
+        }
         if (!authenticatedOwner && under(path, "/api/quotes") && matches(bookingToken, request.getHeader("X-Booking-Token"))) {
             chain.doFilter(request, response);
             return;

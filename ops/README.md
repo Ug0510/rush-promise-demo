@@ -10,7 +10,7 @@ With Java 21, Maven, PostgreSQL 16 command-line tools and Python on the path, ru
 
 Run `ops/deploy-kind.sh` on the dedicated Codespace after selecting Java 21 and its prepared kubeconfig. The preflight PostgreSQL, provider, NudgeBee and monitoring resources are the prerequisites. Kubernetes secrets are supplied privately by the operator. The script builds the jar and loads the commit-tagged image into kind. Console delivery is the default and records `SIMULATED`.
 
-The web and worker have separate deployments and private management ports. Forward only the gateway Service to the approved public HTTPS port. Its allowlist is the caller page, its two assets, two voice POST endpoints and the signed Twilio status POST. Staff uses a separate authenticated private web forward, with the relevant role credential. PostgreSQL, cluster controls and metrics have no public forward.
+The web and worker have separate deployments and private management ports. The public gateway serves the homepage, caller, and owner pages, their allowlisted assets, the public catalog, specific owner account and pickup-desk routes, and authenticated provider callbacks. The app checks the owner session, tenant and CSRF token for protected writes. The gateway strips staff and booking tokens, marks requests as public-edge traffic, and rate-limits authentication. Staff uses a separate authenticated private web forward. PostgreSQL, cluster controls and metrics have no public forward.
 
 ## One live order
 

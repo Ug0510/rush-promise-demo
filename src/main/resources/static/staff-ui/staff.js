@@ -2,12 +2,16 @@
 
 const $ = id => document.getElementById(id);
 const login = $("staff-login");
+const ownerDesk = location.pathname === "/owner/desk";
 const workspace = $("workspace");
 const nav = $("desk-nav");
 const dialog = $("action-dialog");
 const actionForm = $("action-form");
 const profileDialog = $("profile-dialog");
 const profileForm = $("profile-form");
+const profileHours = bindPickupHours($("desk-pickup-hours"), previewGreeting);
+const ownerPhone = typeof bindOwnerPhoneSettings === "function"
+  ? bindOwnerPhoneSettings($("desk-phone-settings"), api) : null;
 const money = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2, minimumFractionDigits: 0 });
 const roleName = { STAFF: "Staff", OWNER: "Owner", OPERATOR: "Operator" };
 const statusName = {
@@ -46,6 +50,7 @@ let activePackingId;
 let selectedAction;
 let returnFocus;
 let shopProfile;
+let shopNow;
 let profileSaving = false;
 
 function element(tag, value, className) {
@@ -100,6 +105,18 @@ function time12(value) {
   return `${hour % 12 || 12}:${String(minute).padStart(2, "0")} ${hour >= 12 ? "PM" : "AM"}`;
 }
 
+function pickupDay(order) {
+  if (!shopNow || !order.pickupAt) return "";
+  const dateFormat = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short" });
+  const day = dateFormat.format(new Date(order.pickupAt));
+  return day === dateFormat.format(new Date(shopNow)) ? "" : day;
+}
+
+function orderPickup(order) {
+  const day = pickupDay(order);
+  return day ? `${day}, ${time12(order.pickupTime)}` : time12(order.pickupTime);
+}
+
 function weight(grams) {
   return grams >= 1000 ? `${grams / 1000} kg` : `${grams} g`;
 }
@@ -114,6 +131,12 @@ function badge(order) {
   const result = element("span", statusName[order.status] || order.status, "status");
   result.dataset.state = order.status;
   return result;
+}
+
+function pickupCode(order) {
+  if (!order.pickupCode || !["AWAITING_APPROVAL", "CONFIRMED", "PACKED"].includes(order.status)) return [];
+  const label = order.status === "AWAITING_APPROVAL" ? "Reference code" : "Pickup code";
+  return [element("p", `${label} ${order.pickupCode}`, "policy-why")];
 }
 
 function fetchLabel(value) {
@@ -245,9 +268,9 @@ function spotlight(order, batch, shopTime, rows) {
   const label = element("div", undefined, "order-reference");
   label.append(element("span", `#${order.id}`), badge(order));
   const facts = element("dl", undefined, "counter-details");
-  facts.append(orderFact("Pickup", time12(order.pickupTime), "◫"),
-    orderFact("Pay at pickup", money.format(order.pricePaise / 100), "▤"));
-  card.append(label, element("h3", item(order)), facts, ...policyEvidence(order));
+  facts.append(orderFact("Pickup", orderPickup(order), "◫"),
+    orderFact("Cash at pickup", money.format(order.pricePaise / 100), "▤"));
+  card.append(label, element("h3", item(order)), facts, ...pickupCode(order), ...policyEvidence(order));
   if (role === "OWNER" && rows?.some(row => row.manualAction)) card.append(delivery(rows, order));
   const blocked = packBlock(batch, shopTime);
   if (blocked) card.append(element("p", blocked, "pack-warning"));
@@ -268,12 +291,12 @@ function orderRow(order, rows, approval = false, shopTime = "") {
   const row = element("article", undefined, approval ? "order-row approval-row" : "order-row");
   const text = element("div");
   text.append(element("h3", `#${order.id} · ${item(order)}`));
-  const time = element("p", time12(order.pickupTime), "muted");
+  const time = element("p", orderPickup(order), "muted");
   if (approval) time.textContent += ` pickup · ${money.format(order.pricePaise / 100)}`;
   text.append(time);
   const notice = delivery(rows, order);
   if (notice) text.append(notice);
-  text.append(...policyEvidence(order));
+  text.append(...pickupCode(order), ...policyEvidence(order));
   const actions = element("div", undefined, "actions");
   if (approval && role === "OWNER") {
     actions.append(actionButton("Review request", "review", order));
@@ -313,7 +336,8 @@ function renderProjection(projection, stock) {
       && batch.phoneGramsFree > 0 && !batch.blocked).sort((a, b) => a.readyTime.localeCompare(b.readyTime))[0];
   $("next-title").textContent = projection ? "Next pickup to offer" : "Next tray";
   $("next-pickup").textContent = option ? time12(option.pickupTime) : !projection && nextTray ? time12(nextTray.readyTime) : "—";
-  $("next-description").textContent = option ? `For ${portion} ${option.itemName.toLowerCase()}`
+  const optionDay = option && pickupDay(option);
+  $("next-description").textContent = option ? `${optionDay ? optionDay + " · " : ""}For ${portion} ${option.itemName.toLowerCase()}`
     : projection ? `No pickup currently available for ${portion} of ${target.itemName.toLowerCase()}.`
     : nextTray ? `Batch ${nextTray.id} is planned. Check pickup availability before promising a time.`
     : "Pickup availability is currently unavailable.";
@@ -427,8 +451,10 @@ function renderStockIssues(batches, orders, deliveries, shopTime) {
 
 function render({orders, stock, policy, deliveries, shop}, projection, comparisons) {
   if (shop) shopProfile = shop;
+  shopNow = stock.now;
   message("desk-shop", ownerSession ? shopProfile?.displayName || ownerSession.shop.displayName : "");
-  const next = orders.filter(order => order.status === "CONFIRMED").sort((a, b) => a.pickupTime.localeCompare(b.pickupTime));
+  const next = orders.filter(order => order.status === "CONFIRMED")
+    .sort((a, b) => Date.parse(a.pickupAt) - Date.parse(b.pickupAt) || a.pickupTime.localeCompare(b.pickupTime));
   const approvals = orders.filter(order => order.status === "AWAITING_APPROVAL")
     .sort((a, b) => String(a.approvalExpiresAt).localeCompare(String(b.approvalExpiresAt)));
   const blockedTrays = new Set(stock.batches.filter(batch => batch.blocked).map(batch => batch.id));
@@ -527,7 +553,8 @@ async function refresh() {
     if (access !== activeAccess()) return;
     if (error.status === 401 || error.status === 403) {
       lockDesk();
-      message("login-error", "Your desk access was rejected. Enter a valid access token.");
+      if (ownerDesk) location.replace("/owner");
+      else message("login-error", "Your desk access was rejected. Enter a valid access token.");
     } else {
       connection("reconnecting", "Connection interrupted. Status may be out of date.");
     }
@@ -538,6 +565,13 @@ async function refresh() {
       void refresh();
     }
   }
+}
+
+function pollDesk() {
+  if (refreshTimer) return;
+  liveMode = "poll";
+  void refresh();
+  refreshTimer = setInterval(() => { if (!document.hidden) void refresh(); }, 4200);
 }
 
 async function subscribe() {
@@ -558,10 +592,14 @@ async function subscribe() {
       cache: "no-store",
       signal: controller.signal
     });
+    if (response.status === 401 || response.status === 403) {
+      lockDesk();
+      if (ownerDesk) location.replace("/owner");
+      else message("login-error", "Your desk access was rejected. Enter a valid access token.");
+      return;
+    }
     if (response.status === 404) {
-      liveMode = "poll";
-      void refresh();
-      refreshTimer = setInterval(() => { if (!document.hidden) void refresh(); }, 4200);
+      pollDesk();
       return;
     }
     if (!response.ok || !response.body) throw new Error("Desk updates interrupted");
@@ -592,7 +630,8 @@ async function subscribe() {
     if (access === activeAccess() && !refreshTimer) {
       liveMode = "down";
       connection("reconnecting", "Live updates interrupted. Reconnecting…");
-      streamRetry = setTimeout(() => void subscribe(), 1800);
+      if (ownerDesk) pollDesk();
+      else streamRetry = setTimeout(() => void subscribe(), 1800);
     }
   }
 }
@@ -615,16 +654,16 @@ function lockDesk() {
   snapshot = "";
   controller?.abort();
   workspace.hidden = true;
-  login.hidden = false;
+  login.hidden = ownerDesk;
   nav.hidden = true;
   $("desk-tools").hidden = true;
   $("staff-token").value = "";
-  $("staff-token").focus();
+  if (!ownerDesk) $("staff-token").focus();
 }
 
 login.addEventListener("submit", async event => {
   event.preventDefault();
-  if (busy) return;
+  if (ownerDesk || busy) return;
   busy = true;
   message("login-error", "");
   try {
@@ -678,7 +717,7 @@ function showAction(button) {
   message("compare-status", "");
   const fields = {
     review: { title: `Review request #${orderId}`, detail: order
-      ? `${item(order)}, ${money.format(order.pricePaise / 100)} at pickup, ${time12(order.pickupTime)}. Decide by ${alertDeadline(order.approvalExpiresAt)}.`
+      ? `${item(order)}, ${money.format(order.pricePaise / 100)} at pickup, ${orderPickup(order)}. Decide by ${alertDeadline(order.approvalExpiresAt)}.`
       : "", submit: "Approve request" },
     short: { title: `Report a shortage for #${orderId}`, detail: order
       ? `Enter the ${piece ? "missing pieces" : "missing weight"}. This will flag Tray ${order.batchId} for a stock check.`
@@ -791,9 +830,9 @@ dialog.addEventListener("close", () => {
 
 function previewGreeting() {
   const name = $("shop-name").value.trim();
-  $("greeting-text").textContent = name ? `नमस्ते, मैं ${name} से बात कर रहा हूँ। बताइए, आपको क्या चाहिए?`
+  $("greeting-text").textContent = name ? `नमस्ते, मैं ${name} से बात कर रहा हूँ।`
     : "Enter a shop name to preview the greeting.";
-  $("profile-save").disabled = profileSaving || name.length === 0 || name === shopProfile?.displayName;
+  $("profile-save").disabled = profileSaving || name.length === 0 || (name === shopProfile?.displayName && !profileHours.changed());
 }
 
 $("shop-settings").addEventListener("click", async () => {
@@ -801,18 +840,23 @@ $("shop-settings").addEventListener("click", async () => {
   message("profile-error", "");
   try {
     if (!shopProfile) shopProfile = await api("/api/shop/profile");
+    const selectedHours = ownerSession?.shop ? await api("/api/owner/pickup-hours") : null;
     $("shop-name").value = shopProfile.displayName;
+    $("profile-save").textContent = selectedHours ? "Save settings" : "Save name";
+    profileHours.load(selectedHours);
     previewGreeting();
     profileDialog.showModal();
+    if (ownerSession?.shop && ownerSession.demoPreview !== true) ownerPhone?.open();
     $("shop-name").focus();
   } catch {
-    message("desk-error", "The saved shop name is temporarily unavailable.");
+    message("desk-error", "Shop settings could not be opened.");
   }
 });
 
 $("shop-name").addEventListener("input", previewGreeting);
 $("profile-cancel").addEventListener("click", () => profileDialog.close());
 profileDialog.addEventListener("close", () => {
+  ownerPhone?.close();
   if (role === "OWNER") $("shop-settings").focus();
 });
 profileForm.addEventListener("submit", async event => {
@@ -824,16 +868,21 @@ profileForm.addEventListener("submit", async event => {
   try {
     const displayName = $("shop-name").value.trim();
     if (ownerSession?.shop) {
-      const { slug, area, hours, pickupInstructions } = ownerSession.shop;
-      ownerSession.shop = await api("/api/owner/shop/details", "POST", { displayName, slug, area, hours, pickupInstructions });
+      const { area, hours, pickupInstructions } = ownerSession.shop;
+      let pickupHours;
+      try { pickupHours = profileHours.read(); }
+      catch (error) { message("profile-error", error.message); return; }
+      const result = await api("/api/owner/shop/settings", "POST", { displayName, area, hours, pickupInstructions, pickupHours });
+      ownerSession.shop = result.shop;
       shopProfile = { displayName: ownerSession.shop.displayName };
+      profileHours.load(result.pickupHours);
     } else {
       shopProfile = await api("/api/shop/profile", "POST", { displayName });
     }
     profileDialog.close();
     void refresh();
   } catch (error) {
-    message("profile-error", error.status === 403 ? "Shop settings need owner access." : "The shop name could not be saved.");
+    message("profile-error", error.status === 403 ? "Shop settings need owner access." : "Shop settings could not be saved.");
   } finally {
     profileSaving = false;
     previewGreeting();
@@ -858,11 +907,16 @@ document.addEventListener("visibilitychange", () => {
 async function openOwnerDesk() {
   try {
     const established = await api("/api/auth/session");
-    if (!established?.shop || token || busy) return;
+    if (!established?.shop || token || busy) {
+      if (ownerDesk) location.replace("/owner");
+      return;
+    }
     ownerSession = established;
+    if ($("desk-demo-banner")) $("desk-demo-banner").hidden = established.demoPreview !== true;
     const identity = await api("/api/staff/session");
     if (identity.role !== "OWNER") {
       ownerSession = null;
+      if (ownerDesk) location.replace("/owner");
       return;
     }
     role = identity.role;
@@ -873,8 +927,13 @@ async function openOwnerDesk() {
     connection("connecting");
     await refresh();
     if (ownerSession) void subscribe();
-  } catch {
+  } catch (error) {
     ownerSession = null;
+    if (ownerDesk) {
+      if (error.status === 401 || error.status === 403) location.replace("/owner");
+      else message("desk-entry-error", "The pickup desk did not connect. Reload to try again.");
+    }
   }
 }
+if (!ownerDesk) login.hidden = false;
 void openOwnerDesk();

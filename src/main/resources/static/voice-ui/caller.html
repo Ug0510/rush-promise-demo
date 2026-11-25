@@ -5,12 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f2f3f0">
   <title>Speak your order · Rush Promise</title>
-  <link rel="stylesheet" href="/voice-ui/caller.css">
-  <script defer src="/voice-ui/caller.js"></script>
+  <link rel="stylesheet" href="/voice-ui/caller.css?v=20261125-3">
+  <script defer src="/voice-ui/caller.js?v=20261125-3"></script>
 </head>
 <body>
   <main class="caller" data-stage="collecting">
-    <header class="brand"><span class="brand-mark" aria-hidden="true"></span>Rush Promise</header>
+    <header class="caller-header">
+      <a class="caller-home" href="https://rush-promise.udit-gupta.com/"><span aria-hidden="true">←</span> Back to Rush Promise</a>
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Rush Promise</div>
+    </header>
     <p id="caller-shop" class="action-hint" hidden></p>
     <section class="caller-title">
       <h1 id="caller-heading">Speak your order</h1>
@@ -35,7 +38,7 @@
         </div>
         <dl class="quote-details">
           <div class="pickup-time"><dt>Pickup</dt><dd id="pickup"></dd></div>
-          <div class="pickup-price"><dt>Pay at pickup</dt><dd id="amount"></dd></div>
+          <div class="pickup-price"><dt>Cash at pickup</dt><dd id="amount"></dd></div>
         </dl>
         <p id="approval-note" class="approval-note" hidden>Shop approval is required for this request.</p>
         <div id="quote-policy" class="quote-policy" hidden>
@@ -58,8 +61,24 @@
     </section>
     <p id="error" class="error" role="alert" hidden></p>
 
+    <section id="checkout-method" class="checkout-method" aria-label="How to send your order" hidden>
+      <div class="mode-switch" role="group" aria-label="Order method">
+        <button type="button" id="mode-speak" aria-pressed="true">Speak</button>
+        <button type="button" id="mode-type" aria-pressed="false">Type</button>
+      </div>
+      <p id="voice-availability" class="checkout-note" hidden>Voice ordering is temporarily unavailable.</p>
+      <form id="typed-order" hidden>
+        <label for="typed-utterance">Your order</label>
+        <p id="typed-example" class="checkout-note" hidden></p>
+        <textarea id="typed-utterance" rows="2" maxlength="500" dir="auto" aria-describedby="typed-example typed-help" required></textarea>
+        <button id="typed-quote" type="submit" class="button quiet">Get pickup quote</button>
+        <p id="typed-help" class="checkout-note">No phone number needed. You’ll see a pickup code when your reservation is confirmed.</p>
+      </form>
+    </section>
+
     <div class="caller-actions">
       <button id="speak" class="button primary" form="caller-form" type="submit"><span class="microphone" aria-hidden="true"></span><span id="speak-label">Start speaking</span></button>
+      <button id="typed-confirm" class="button primary" type="button" hidden>Confirm pickup</button>
       <button id="retry" class="button quiet" type="button" hidden>Retry this turn</button>
       <button id="restart" class="button quiet" type="button" hidden>Start a new order</button>
       <p id="action-hint" class="action-hint" hidden></p>

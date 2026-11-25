@@ -20,54 +20,157 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Instant;
 import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
+import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 @Service
 @Profile("!worker")
 public class BookingService {
+    private static final SecureRandom PICKUP_CODES = new SecureRandom();
     private final BookingStore store;
     private final PolicyService policyService;
     private final TransactionTemplate transactions;
     private final Timer batchLockTime;
     private final SlotPolicyProvider slotPolicies;
+    private final NativePickupIdentity nativePickup;
+    private final GuestCheckouts guestCheckouts;
 
     BookingService(BookingStore store, PolicyService policyService, TransactionTemplate transactions, MeterRegistry metrics) {
-        this(store, policyService, transactions, metrics, null);
+        this(store, policyService, transactions, metrics, null, null, null);
     }
 
     @Autowired
     BookingService(BookingStore store, PolicyService policyService, TransactionTemplate transactions, MeterRegistry metrics,
-                   @Nullable SlotPolicyProvider slotPolicies) {
+                   @Nullable SlotPolicyProvider slotPolicies, NativePickupIdentity nativePickup, GuestCheckouts guestCheckouts) {
         this.store = store;
         this.policyService = policyService;
         this.transactions = transactions;
         this.batchLockTime = metrics.timer("rush.booking.batch.lock");
         this.slotPolicies = slotPolicies;
+        this.nativePickup = nativePickup;
+        this.guestCheckouts = guestCheckouts;
     }
 
     public Outcome quote(QuoteRequest request) {
-        if (!validQuoteRequest(request)) return Outcome.error(400, "INVALID_REQUEST", null);
+        if (!validQuoteRequest(request) || !validPhone(request.phone())) return Outcome.error(400, "INVALID_REQUEST", null);
+        return quote(request, null, NativeIdentityKind.CALLER);
+    }
+
+    public String nativePickupSubject(String sessionId, String providerSubject) {
+        return nativePickup == null ? null : nativePickup.subject(sessionId, providerSubject);
+    }
+
+    public String nativeInteractionSubject(String sessionId) {
+        return nativePickup == null ? null : nativePickup.interactionSubject(sessionId);
+    }
+
+    public Outcome quoteNativePickup(QuoteRequest request, String subject) {
+        return quoteNativePickup(request, subject, NativeIdentityKind.CALLER);
+    }
+
+    public Outcome quoteNativePickup(QuoteRequest request, String subject, NativeIdentityKind kind) {
+        if (!validQuoteRequest(request) || request.phone() != null || !NativePickupIdentity.isSubject(subject)
+                || kind == null || kind == NativeIdentityKind.GUEST || !nativePickupAllowed(request.sessionId())
+                || (kind == NativeIdentityKind.CALL && !subject.equals(nativeInteractionSubject(request.sessionId())))) {
+            return Outcome.error(404, "NATIVE_PICKUP_UNAVAILABLE", null);
+        }
+        return quote(request, subject, kind);
+    }
+
+    public Outcome quoteGuestPickup(QuoteRequest request, String subject) {
+        if (!validQuoteRequest(request) || request.phone() != null || subject == null || guestCheckouts == null
+                || !subject.equals(guestCheckouts.subject(request.sessionId()))) {
+            return Outcome.error(404, "GUEST_PICKUP_UNAVAILABLE", null);
+        }
+        return quote(request, subject, NativeIdentityKind.GUEST);
+    }
+
+    private Outcome quote(QuoteRequest request, String subject, NativeIdentityKind kind) {
         var captured = capturePolicies();
         return transactions.execute(transaction -> {
-            Shop shop = store.shop();
+            Shop shop = store.shop(true);
             var item = item(request.sku());
             if (item == null) return Outcome.error(404, "ITEM_NOT_FOUND", null);
             String invalid = invalidQuantity(request.sku(), item, request.grams(), captured);
             if (invalid != null) return Outcome.error(422, invalid, null);
-            var pickup = requestedTime(shop, request.pickupTime());
-            store.db.update("INSERT INTO booking_sessions (id,run_id,phone) VALUES (?,?,?) ON CONFLICT (id) DO NOTHING",
-                    request.sessionId(), shop.runId(), request.phone());
+            var pickup = requestedTime(shop, request.pickupTime(), request.requestedPickupAt());
+            if (pickup == null) return Outcome.error(400, "INVALID_PICKUP_DATE", null);
+            store.db.update("INSERT INTO booking_sessions (id,run_id,phone,native_pickup_subject,native_identity_kind) VALUES (?,?,?,?,?) ON CONFLICT (id) DO NOTHING",
+                    request.sessionId(), shop.runId(), request.phone(), subject, kind.name());
             var session = session(request.sessionId());
-            if (!session.phone().equals(request.phone())) return Outcome.error(409, "SESSION_MISMATCH", null);
-            var match = replacement(shop, request, item, captured, pickup);
+            if (!Objects.equals(session.phone(), request.phone()) || !Objects.equals(session.nativeSubject(), subject) || session.kind() != kind) {
+                return Outcome.error(409, "SESSION_MISMATCH", null);
+            }
+            if (alreadyBookedPickup(shop, session)) return Outcome.error(409, "CALL_ALREADY_BOOKED", null);
+            var match = replacement(shop, request, item, captured, pickup, kind);
             if (match == null) {
                 store.db.update("UPDATE booking_sessions SET latest_quote_id = NULL WHERE id = ?", request.sessionId());
-                return Outcome.error(409, "CONFLICT", "NONE_AVAILABLE");
+                if (kind.singlePickup() && findOption(shop, captured, item, request.sku(), request.grams(), pickup, null) != null) {
+                    return Outcome.error(409, "CALL_APPROVAL_UNAVAILABLE", null);
+                }
+                String constraint = scheduleReason(shop, pickup);
+                return Outcome.error(409, "CONFLICT", constraint == null ? "NONE_AVAILABLE" : constraint);
             }
-            String reason = pickup.equals(match.pickupAt()) ? null : availabilityReason(shop, captured, item, request.sku(), request.grams(), pickup);
+            String reason = pickup.equals(match.pickupAt()) ? null : alternativeReason(shop, captured, item, request, pickup, kind);
             return new Outcome(200, "QUOTED", reason, match, null);
         });
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public PickupPreview previewPickup(String sku, int quantity, String pickupTime) {
+        if (!validPickupTime(pickupTime)) return null;
+        var options = availablePickups(sku, quantity, pickupTime, 1);
+        return options.isEmpty() ? null : options.getFirst();
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public List<PickupPreview> availablePickups(String sku, int quantity, String start, int limit) {
+        return availablePickups(sku, quantity, start, null, limit);
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public List<PickupPreview> availablePickups(String sku, int quantity, String start, Instant requestedPickupAt, int limit) {
+        if (!validIdentifier(sku) || (start != null && !validPickupTime(start)) || limit < 1) return List.of();
+        var captured = capturePolicies();
+        var item = readItem(sku, false);
+        if (item == null || invalidQuantity(sku, item, quantity, captured) != null) return List.of();
+        var shop = store.shop();
+        var requested = start == null ? shop.now() : requestedTime(shop, start, requestedPickupAt);
+        if (requested == null) return List.of();
+        return findOptions(shop, captured, item, sku, quantity, requested, null, Math.min(limit, 12)).stream()
+                .map(option -> new PickupPreview(item.name(), quantity, item.unit(), price(item, quantity), shopTime(option.pickupAt()),
+                        requiresApproval(item, quantity, option.policy()), option.pickupAt())).toList();
+    }
+
+    public PickupHours pickupHours() { return store.pickupHours(); }
+
+    public Instant currentShopTime() { return store.shop().now(); }
+
+    @Transactional
+    public PickupHours updatePickupHours(PickupHoursInput input) {
+        if (TenantContext.legacy()) throw new IllegalArgumentException("Choose pickup hours");
+        validatePickupHours(input);
+        LocalTime opensAt = input.allDay() ? null : halfHour(input.opensAt());
+        LocalTime closesAt = input.allDay() ? null : halfHour(input.closesAt());
+        store.db.update("UPDATE shop_state SET pickup_all_day=?,pickup_opens_at=?,pickup_closes_at=? WHERE id=1", input.allDay(), opensAt, closesAt);
+        return store.pickupHours();
+    }
+
+    public static void validatePickupHours(PickupHoursInput input) {
+        if (input == null || input.allDay() == null) throw new IllegalArgumentException("Choose pickup hours");
+        if (!input.allDay() && halfHour(input.opensAt()).isAfter(halfHour(input.closesAt()))) {
+            throw new IllegalArgumentException("Closing time must be at or after opening time");
+        }
+    }
+
+    private static LocalTime halfHour(String value) {
+        if (!validPickupTime(value) || !(value.endsWith(":00") || value.endsWith(":30"))) {
+            throw new IllegalArgumentException("Choose a time on the hour or half hour");
+        }
+        return LocalTime.parse(value);
     }
 
     public Availability nextAvailability(String sku, int grams, String pickupTime) {
@@ -83,7 +186,8 @@ public class BookingService {
             if (invalid != null) return new Availability(null, invalid);
             Instant requested = pickupTime == null ? shop.now() : requestedTime(shop, pickupTime);
             var option = findOption(shop, captured, item, sku, grams, requested, null);
-            if (option == null) return new Availability(null, "NONE_AVAILABLE");
+            String constraint = scheduleReason(shop, requested);
+            if (option == null) return new Availability(null, pickupTime != null && constraint != null ? constraint : "NONE_AVAILABLE");
             String reason = pickupTime == null || option.pickupAt().equals(requested) ? null
                     : availabilityReason(shop, captured, item, sku, grams, requested);
             var view = new AvailabilityOption(sku, item.name(), grams, shopTime(option.pickupAt()), option.pickupAt(),
@@ -160,6 +264,14 @@ public class BookingService {
     }
 
     public Outcome accept(String quoteId, AcceptRequest request, String idempotencyKey) {
+        return accept(quoteId, request, idempotencyKey, false);
+    }
+
+    public Outcome acceptNativePickup(String quoteId, AcceptRequest request) {
+        return accept(quoteId, request, null, true);
+    }
+
+    private Outcome accept(String quoteId, AcceptRequest request, String idempotencyKey, boolean contactless) {
         UUID id = parseId(quoteId);
         if (id == null || request == null || !validIdentifier(request.sessionId()) || !validIdentifier(request.turnId())
                 || (idempotencyKey != null && !validIdentifier(idempotencyKey))) {
@@ -168,7 +280,7 @@ public class BookingService {
         String derivedKey = "call:" + request.sessionId() + ":quote:" + id;
         String key = idempotencyKey == null ? derivedKey : "client:" + idempotencyKey;
         try {
-            return transactions.execute(transaction -> acceptLocked(id, request, key));
+            return transactions.execute(transaction -> acceptLocked(id, request, key, contactless));
         } catch (DataAccessException | TransactionException failure) {
             // A lost commit acknowledgement cannot tell us which outcome was durable. Resolve through the same key.
             return Outcome.error(503, "BOOKING_UNCERTAIN", null);
@@ -176,6 +288,14 @@ public class BookingService {
     }
 
     public Outcome resolve(String quoteId, AcceptRequest request, String idempotencyKey) {
+        return resolve(quoteId, request, idempotencyKey, false);
+    }
+
+    public Outcome resolveNativePickup(String quoteId, AcceptRequest request) {
+        return resolve(quoteId, request, null, true);
+    }
+
+    private Outcome resolve(String quoteId, AcceptRequest request, String idempotencyKey, boolean contactless) {
         UUID id = parseId(quoteId);
         if (id == null || request == null || !validIdentifier(request.sessionId()) || !validIdentifier(request.turnId())
                 || (idempotencyKey != null && !validIdentifier(idempotencyKey))) {
@@ -186,6 +306,7 @@ public class BookingService {
             return transactions.execute(transaction -> {
                 var shop = store.shop();
                 lockKey(key);
+                if (!canReadQuote(store.quote(id), request.sessionId(), contactless)) return Outcome.error(404, "BOOKING_NOT_FOUND", null);
                 var saved = replay(shop, key, id, request.sessionId());
                 return saved == null ? Outcome.error(404, "BOOKING_NOT_FOUND", null) : saved;
             });
@@ -194,13 +315,14 @@ public class BookingService {
         }
     }
 
-    private Outcome acceptLocked(UUID quoteId, AcceptRequest request, String key) {
-        Shop shop = store.shop();
+    private Outcome acceptLocked(UUID quoteId, AcceptRequest request, String key, boolean contactless) {
+        Shop shop = store.shop(true);
         lockKey(key);
+        var quoteRow = store.quote(quoteId);
+        if (!canReadQuote(quoteRow, request.sessionId(), contactless)) return Outcome.error(404, "QUOTE_NOT_FOUND", null);
         var replay = replay(shop, key, quoteId, request.sessionId());
         if (replay != null) return replay;
         var session = session(request.sessionId());
-        var quoteRow = store.quote(quoteId);
         if (session == null || quoteRow == null || !quoteRow.quote().sessionId().equals(request.sessionId())) {
             return Outcome.error(404, "QUOTE_NOT_FOUND", null);
         }
@@ -210,49 +332,76 @@ public class BookingService {
         if (!quoteId.equals(session.latestQuoteId())) {
             return decide(shop, key, quoteId, request, Outcome.error(409, "STALE_ACCEPTANCE", null));
         }
+        if (alreadyBookedPickup(shop, session)) return decide(shop, key, quoteId, request, Outcome.error(409, "CALL_ALREADY_BOOKED", null));
         // One capture is reused even when a changed slot requires a replacement quote.
         var captured = capturePolicies();
         var item = item(quote.sku());
-        var quoteRequest = new QuoteRequest(quote.sessionId(), quoteRow.name(), quoteRow.phone(), quote.sku(), quote.grams(), quote.pickupTime());
+        var quoteRequest = new QuoteRequest(quote.sessionId(), quoteRow.name(), quoteRow.phone(), quote.sku(), quote.grams(), quote.pickupTime(), quote.pickupAt());
         if (!quote.expiresAt().isAfter(shop.now())) {
-            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, 410, "EXPIRED", null));
+            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, session.kind(), 410, "EXPIRED", null));
+        }
+        String constraint = scheduleReason(shop, quote.pickupAt());
+        if (constraint != null) {
+            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, session.kind(), 409, "CONFLICT", constraint));
         }
         if (captured.applies(item) || requiresApproval(item, quote.grams(), captured.general())) {
             // Match the established phone → tray → slot lock order. A later slot read can introduce approval.
-            lockKey("approval:" + quoteRow.phone());
+            lockKey(contactless ? "approval:native:" + session.nativeSubject() : "approval:" + quoteRow.phone());
         }
         var batch = batchLockTime.record(() -> store.find("SELECT phone_grams_free, ready_at, blocked FROM batches WHERE id = ? FOR UPDATE",
                 (r, n) -> new Batch(r.getInt("phone_grams_free"), at(r, "ready_at"), r.getBoolean("blocked")), quote.batchId()));
         if (batch == null || batch.blocked() || batch.free() < quote.grams() || batch.readyAt().isAfter(packReadyCutoff(quote.pickupAt()))) {
-            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, 409, "CONFLICT", "OUT_OF_STOCK"));
+            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, session.kind(), 409, "CONFLICT", "OUT_OF_STOCK"));
         }
         var slot = readSlot(quote.pickupAt(), true);
         if (slot == null || !slot.available()) {
-            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, 409, "CONFLICT", "SLOT_FULL"));
+            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, session.kind(), 409, "CONFLICT", "SLOT_FULL"));
         }
         shop = store.shop();
         if (!quote.expiresAt().isAfter(shop.now())) {
-            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, 410, "EXPIRED", null));
+            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, session.kind(), 410, "EXPIRED", null));
         }
         Policy computed = captured.evaluate(item, quote.grams(), slot);
         boolean approval = requiresApproval(item, quote.grams(), computed);
         if (!eligibleTime(shop, quote.pickupAt(), computed, approval)) {
-            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, 409, "CONFLICT", "TOO_SOON"));
+            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, session.kind(), 409, "CONFLICT", "TOO_SOON"));
+        }
+        if (approval && session.kind().singlePickup()) {
+            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, session.kind(),
+                    409, "CALL_APPROVAL_UNAVAILABLE", "CALL_APPROVAL_UNAVAILABLE"));
         }
         if (changedTerms(item, quote, computed, approval)) {
-            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, 409, "TERMS_CHANGED", null));
+            return decide(shop, key, quoteId, request, requote(shop, quoteRequest, item, captured, quote, session.kind(), 409, "TERMS_CHANGED", null));
         }
-        if (approval && hasPending(shop.runId(), quoteRow.phone())) {
+        if (approval && hasPending(shop.runId(), session)) {
             return decide(shop, key, quoteId, request, Outcome.error(409, "PENDING_APPROVAL_LIMIT", null));
         }
         Policy current = withTerms(computed, item, quote.sku(), quote.grams(), quote.pickupAt(), approval);
-        var order = reserve(shop, quoteRow, request.turnId(), current);
+        var order = reserve(shop, quoteRow, request.turnId(), current, session);
         return decide(shop, key, quoteId, request, new Outcome(201, order.status(), null, null, order));
     }
 
-    private boolean hasPending(UUID run, String phone) {
-        return Boolean.TRUE.equals(store.db.queryForObject(
-                "SELECT EXISTS (SELECT 1 FROM orders WHERE run_id=? AND phone=? AND status='AWAITING_APPROVAL')", Boolean.class, run, phone));
+    private boolean canReadQuote(QuoteRow row, String sessionId, boolean contactless) {
+        if (!contactless) return row == null || row.phone() != null;
+        return row != null && row.phone() == null && row.quote().sessionId().equals(sessionId)
+                && (nativePickupAllowed(sessionId) || guestCheckouts != null && guestCheckouts.subject(sessionId) != null);
+    }
+
+    private boolean nativePickupAllowed(String sessionId) {
+        return nativePickup != null && nativePickup.validRoute(sessionId);
+    }
+
+    private boolean hasPending(UUID run, Session session) {
+        String identity = session.nativeSubject() == null ? "phone" : "native_pickup_subject";
+        String value = session.nativeSubject() == null ? session.phone() : session.nativeSubject();
+        return Boolean.TRUE.equals(store.db.queryForObject("SELECT EXISTS (SELECT 1 FROM orders WHERE run_id=? AND "
+                + identity + "=? AND status='AWAITING_APPROVAL')", Boolean.class, run, value));
+    }
+
+    private boolean alreadyBookedPickup(Shop shop, Session session) {
+        return session.kind().singlePickup() && Boolean.TRUE.equals(store.db.queryForObject("""
+                SELECT EXISTS (SELECT 1 FROM orders WHERE run_id=? AND native_identity_kind=? AND native_pickup_subject=?)
+                """, Boolean.class, shop.runId(), session.kind().name(), session.nativeSubject()));
     }
 
     private static boolean changedTerms(Item item, Quote quote, Policy current, boolean approval) {
@@ -262,7 +411,7 @@ public class BookingService {
                 || (current.slot() == null && quote.policy().slot() == null && current.pickupGraceMinutes() != quote.policy().pickupGraceMinutes());
     }
 
-    private Order reserve(Shop shop, QuoteRow quoteRow, String turnId, Policy policy) {
+    private Order reserve(Shop shop, QuoteRow quoteRow, String turnId, Policy policy, Session session) {
         var quote = quoteRow.quote();
         store.db.update("UPDATE batches SET phone_grams_free = phone_grams_free - ? WHERE id = ?", quote.grams(), quote.batchId());
         store.db.update("UPDATE pickup_slots SET used = used + 1 WHERE pickup_at = ?", sqlTime(quote.pickupAt()));
@@ -273,29 +422,41 @@ public class BookingService {
             Instant cutoff = packReadyCutoff(quote.pickupAt());
             deadline = proposed.isBefore(cutoff) ? proposed : cutoff;
         }
+        String pickupCode = session.nativeSubject() == null ? null : nextPickupCode();
         long number = store.db.queryForObject("""
                 INSERT INTO orders (id,run_id,accepted_quote_id,accepted_turn_id,customer_name,phone,sku,item_name,grams,price_paise,
-                    pickup_at,batch_id,status,approval_expires_at,policy,created_at,sale_unit)
-                VALUES (nextval('order_number_seq'),?,?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?) RETURNING id
+                    pickup_at,batch_id,status,approval_expires_at,policy,created_at,sale_unit,native_pickup_subject,pickup_code,native_identity_kind)
+                VALUES (nextval('order_number_seq'),?,?,?,?,?,?,?,?,?,?,?,?,?,?::jsonb,?,?,?,?,?) RETURNING id
                 """, Long.class, shop.runId(), quote.id(), turnId, quoteRow.name(), quoteRow.phone(), quote.sku(), quote.itemName(),
                 quote.grams(), quote.pricePaise(), sqlTime(quote.pickupAt()), quote.batchId(), status,
-                sqlTime(deadline), store.write(policy), sqlTime(shop.now()), quote.unit());
+                sqlTime(deadline), store.write(policy), sqlTime(shop.now()), quote.unit(), session.nativeSubject(), pickupCode, session.kind().name());
         var order = store.order(number);
         store.event(order, status, shop.now());
         store.message(order, status);
         return order;
     }
 
-    private Outcome requote(Shop shop, QuoteRequest request, Item item, CapturedPolicies captured, Quote original,
+    private String nextPickupCode() {
+        lockKey("native-pickup-code:" + TenantContext.schema());
+        for (int tries = 0; tries < 8; tries++) {
+            String code = Integer.toString(PICKUP_CODES.nextInt(90_000_000) + 10_000_000);
+            if (!Boolean.TRUE.equals(store.db.queryForObject("SELECT EXISTS (SELECT 1 FROM orders WHERE pickup_code=?)", Boolean.class, code))) return code;
+        }
+        throw new IllegalStateException("Could not allocate a pickup code");
+    }
+
+    private Outcome requote(Shop shop, QuoteRequest request, Item item, CapturedPolicies captured, Quote original, NativeIdentityKind kind,
                             int status, String code, String reason) {
-        var fresh = replacement(shop, request, item, captured, original.pickupAt());
+        var fresh = replacement(shop, request, item, captured, original.pickupAt(), kind);
         if (fresh == null) store.db.update("UPDATE booking_sessions SET latest_quote_id = NULL WHERE id = ?", request.sessionId());
         return new Outcome(status, code, reason == null && fresh == null ? "NONE_AVAILABLE" : reason, fresh, null);
     }
 
-    private Quote replacement(Shop shop, QuoteRequest request, Item item, CapturedPolicies captured, Instant requested) {
-        var option = findOption(shop, captured, item, request.sku(), request.grams(), requested, null);
+    private Quote replacement(Shop shop, QuoteRequest request, Item item, CapturedPolicies captured, Instant requested, NativeIdentityKind kind) {
+        var options = findOptions(shop, captured, item, request.sku(), request.grams(), requested, null, 1, !kind.singlePickup());
+        var option = options.isEmpty() ? null : options.getFirst();
         if (option == null) return null;
+        if (shop.hours() != null) store.db.update("INSERT INTO pickup_slots(pickup_at,capacity) VALUES (?,12) ON CONFLICT DO NOTHING", sqlTime(option.pickupAt()));
         boolean approval = requiresApproval(item, request.grams(), option.policy());
         Policy policy = withTerms(option.policy(), item, request.sku(), request.grams(), option.pickupAt(), approval);
         var quote = new Quote(UUID.randomUUID(), request.sessionId(), request.sku(), item.name(), request.grams(),
@@ -312,25 +473,64 @@ public class BookingService {
     }
 
     private Option findOption(Shop shop, CapturedPolicies captured, Item item, String sku, int grams, Instant requested, Boolean readyNow) {
+        var options = findOptions(shop, captured, item, sku, grams, requested, readyNow, 1);
+        return options.isEmpty() ? null : options.getFirst();
+    }
+
+    private List<Option> findOptions(Shop shop, CapturedPolicies captured, Item item, String sku, int grams, Instant requested,
+                                     Boolean readyNow, int limit) {
+        return findOptions(shop, captured, item, sku, grams, requested, readyNow, limit, true);
+    }
+
+    private List<Option> findOptions(Shop shop, CapturedPolicies captured, Item item, String sku, int grams, Instant requested,
+                                     Boolean readyNow, int limit, boolean allowApproval) {
         Instant earliest = captured.applies(item) ? shop.now() : shop.now().plus(captured.general().leadMinutes(), ChronoUnit.MINUTES);
         Instant from = requested.isAfter(earliest) ? requested : earliest;
+        var args = new ArrayList<Object>();
+        String slotRows = "SELECT pickup_at,used,capacity FROM pickup_slots";
+        var hours = shop.hours();
+        if (hours != null) {
+            slotRows = """
+                    SELECT agenda.pickup_at,COALESCE(existing.used,0) AS used,COALESCE(existing.capacity,12) AS capacity
+                    FROM (SELECT (?::date+days.offset_days) AS local_day FROM (VALUES (0),(1)) days(offset_days)) d
+                    CROSS JOIN LATERAL generate_series((d.local_day+?::time) AT TIME ZONE 'Asia/Kolkata',
+                        (d.local_day+?::time) AT TIME ZONE 'Asia/Kolkata',INTERVAL '30 minutes') agenda(pickup_at)
+                    LEFT JOIN pickup_slots existing USING (pickup_at)
+                    """;
+            args.add(shop.now().atZone(SHOP_ZONE).toLocalDate());
+            args.add(hours.allDay() ? LocalTime.MIDNIGHT : LocalTime.parse(hours.opensAt()));
+            args.add(hours.allDay() ? LocalTime.of(23, 30) : LocalTime.parse(hours.closesAt()));
+        }
+        java.util.Collections.addAll(args, sku, PACK_BUFFER_MINUTES, sqlTime(from), grams, readyNow, sqlTime(shop.now()), readyNow);
         var candidates = store.db.query("""
                 SELECT DISTINCT ON (s.pickup_at) s.pickup_at, s.used, s.capacity, b.id, b.ready_at, b.phone_grams_free, b.status
-                FROM pickup_slots s JOIN batches b
+                FROM (%s) s JOIN batches b
                   ON b.sku = ? AND b.ready_at <= s.pickup_at - make_interval(mins => ?)
                   WHERE s.pickup_at >= ? AND s.used < s.capacity AND NOT b.blocked AND b.phone_grams_free >= ?
                     AND (?::boolean IS NULL OR (b.status='READY' AND b.ready_at <= ?) = ?::boolean)
                   ORDER BY s.pickup_at, b.ready_at, b.id
-                """, (r, n) -> new Candidate(at(r, "pickup_at"), r.getString("id"), at(r, "ready_at"),
-                r.getInt("phone_grams_free"), r.getString("status"), new Slot(r.getInt("used"), r.getInt("capacity"))), sku, PACK_BUFFER_MINUTES, sqlTime(from), grams,
-                readyNow, sqlTime(shop.now()), readyNow);
+                """.formatted(slotRows), (r, n) -> new Candidate(at(r, "pickup_at"), r.getString("id"), at(r, "ready_at"),
+                r.getInt("phone_grams_free"), r.getString("status"), new Slot(r.getInt("used"), r.getInt("capacity"))), args.toArray());
+        var choices = new ArrayList<Option>(limit);
         for (var candidate : candidates) {
             Policy policy = captured.evaluate(item, grams, candidate.slot());
-            if (eligibleTime(shop, candidate.pickupAt(), policy, requiresApproval(item, grams, policy))) {
-                return new Option(candidate.pickupAt(), candidate.batchId(), candidate.batchReadyAt(), candidate.freeGrams(), candidate.batchStatus(), policy);
+            boolean approval = requiresApproval(item, grams, policy);
+            if ((allowApproval || !approval) && eligibleTime(shop, candidate.pickupAt(), policy, approval)) {
+                choices.add(new Option(candidate.pickupAt(), candidate.batchId(), candidate.batchReadyAt(), candidate.freeGrams(), candidate.batchStatus(), policy));
+                if (choices.size() == limit) break;
             }
         }
-        return null;
+        return choices;
+    }
+
+    private static String scheduleReason(Shop shop, Instant pickup) {
+        var hours = shop.hours();
+        if (hours == null) return null;
+        LocalTime at = pickup.atZone(SHOP_ZONE).toLocalTime();
+        if (!hours.allDay() && (at.isBefore(LocalTime.parse(hours.opensAt())) || at.isAfter(LocalTime.parse(hours.closesAt())))) {
+            return "OUTSIDE_HOURS";
+        }
+        return at.getMinute() % 30 != 0 || at.getSecond() != 0 || at.getNano() != 0 ? "PICKUP_INTERVAL" : null;
     }
 
     private static boolean eligibleTime(Shop shop, Instant pickup, Policy policy, boolean approval) {
@@ -344,11 +544,33 @@ public class BookingService {
     }
 
     private Instant requestedTime(Shop shop, String pickupTime) {
-        return shop.now().atZone(SHOP_ZONE).toLocalDate().atTime(LocalTime.parse(pickupTime))
-                .atZone(SHOP_ZONE).toInstant();
+        return requestedTime(shop, pickupTime, null);
+    }
+
+    private Instant requestedTime(Shop shop, String pickupTime, Instant requestedPickupAt) {
+        var today = shop.now().atZone(SHOP_ZONE).toLocalDate();
+        var local = LocalTime.parse(pickupTime);
+        if (requestedPickupAt == null) return today.atTime(local).atZone(SHOP_ZONE).toInstant();
+        var requested = requestedPickupAt.atZone(SHOP_ZONE);
+        if (!requested.toLocalTime().equals(local) || requested.toLocalDate().isBefore(today)
+                || requested.toLocalDate().isAfter(today.plusDays(1))) return null;
+        return requestedPickupAt;
+    }
+
+    private String alternativeReason(Shop shop, CapturedPolicies captured, Item item, QuoteRequest request, Instant requested, NativeIdentityKind kind) {
+        String constraint = scheduleReason(shop, requested);
+        if (constraint != null) return constraint;
+        if (kind.singlePickup()) {
+            var requestedOption = findOption(shop, captured, item, request.sku(), request.grams(), requested, null);
+            if (requestedOption != null && requestedOption.pickupAt().equals(requested)
+                    && requiresApproval(item, request.grams(), requestedOption.policy())) return "CALL_APPROVAL_UNAVAILABLE";
+        }
+        return availabilityReason(shop, captured, item, request.sku(), request.grams(), requested);
     }
 
     private String availabilityReason(Shop shop, CapturedPolicies captured, Item item, String sku, int grams, Instant requested) {
+        String constraint = scheduleReason(shop, requested);
+        if (constraint != null) return constraint;
         var slot = readSlot(requested, false);
         var policy = slot == null || !slot.available() ? captured.general() : captured.evaluate(item, grams, slot);
         if ((slot == null || slot.available()) && !eligibleTime(shop, requested, policy, requiresApproval(item, grams, policy))) return "TOO_SOON";
@@ -359,7 +581,7 @@ public class BookingService {
     }
 
     private CapturedPolicies capturePolicies() {
-        var snapshot = slotPolicies == null || !TenantContext.legacy() ? null : slotPolicies.capture();
+        var snapshot = slotPolicies != null && (TenantContext.legacy() || store.hostedPolicyDemoShop()) ? slotPolicies.capture() : null;
         return new CapturedPolicies(policyService.current(), snapshot);
     }
 
@@ -410,12 +632,18 @@ public class BookingService {
     }
 
     private Session session(String sessionId) {
-        return store.find("SELECT phone,latest_quote_id FROM booking_sessions WHERE id = ? FOR UPDATE",
-                (r, n) -> new Session(r.getString("phone"), r.getObject("latest_quote_id", UUID.class)), sessionId);
+        return store.find("SELECT phone,latest_quote_id,native_pickup_subject,native_identity_kind FROM booking_sessions WHERE id = ? FOR UPDATE",
+                (r, n) -> new Session(r.getString("phone"), r.getObject("latest_quote_id", UUID.class), r.getString("native_pickup_subject"),
+                        NativeIdentityKind.valueOf(r.getString("native_identity_kind"))), sessionId);
     }
 
     private Item item(String sku) {
-        return store.find("SELECT name,price_per_kg_paise,sale_unit FROM items WHERE sku = ? FOR SHARE", (r, n) -> new Item(r.getString("name"), r.getInt("price_per_kg_paise"), r.getString("sale_unit")), sku);
+        return readItem(sku, true);
+    }
+
+    private Item readItem(String sku, boolean lock) {
+        String query = "SELECT name,price_per_kg_paise,sale_unit FROM items WHERE sku=?" + (lock ? " FOR SHARE" : "");
+        return store.find(query, (r, n) -> new Item(r.getString("name"), r.getInt("price_per_kg_paise"), r.getString("sale_unit")), sku);
     }
 
     private static int price(Item item, int grams) {
@@ -428,7 +656,7 @@ public class BookingService {
     }
 
     private static boolean validQuoteRequest(QuoteRequest request) {
-        return request != null && validIdentifier(request.sessionId()) && validPhone(request.phone())
+        return request != null && validIdentifier(request.sessionId())
                 && request.customerName() != null && !request.customerName().isBlank() && request.customerName().length() <= 100
                 && validIdentifier(request.sku()) && validPickupTime(request.pickupTime()) && request.grams() > 0;
     }
@@ -481,5 +709,5 @@ public class BookingService {
             return applies(item) ? snapshot.evaluate(grams, slot.used(), slot.capacity()) : general;
         }
     }
-    private record Session(String phone, UUID latestQuoteId) {}
+    private record Session(String phone, UUID latestQuoteId, String nativeSubject, NativeIdentityKind kind) {}
 }

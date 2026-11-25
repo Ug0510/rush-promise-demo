@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import javax.sql.DataSource;
+import java.text.Normalizer;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -20,6 +21,7 @@ import java.util.UUID;
 public class TenantDirectory {
     private static final Logger log = LoggerFactory.getLogger(TenantDirectory.class);
     private static final String FIELDS = "id, owner_id, slug, schema_name, display_name, area, hours, pickup_instructions, demo_fixture, state";
+    private static final int PUBLIC_LIMIT = 12;
     private final JdbcTemplate db;
     private final DataSource dataSource;
 
@@ -34,14 +36,54 @@ public class TenantDirectory {
 
     Shop bySlug(String slug) {
         if (!validSlug(slug)) return null;
-        return one("SELECT " + FIELDS + " FROM public.rush_tenants WHERE slug=? AND state='ACTIVE'", slug);
+        return one("SELECT " + FIELDS + " FROM public.rush_tenants WHERE slug=? AND state='ACTIVE'"
+                + " AND EXISTS (SELECT 1 FROM public.rush_accounts a WHERE a.id=owner_id AND a.preview_expires_at IS NULL)", slug);
+    }
+
+    DirectoryView storefrontDirectory(String query) {
+        String key = routingKey(query);
+        var matches = publicShops().stream()
+                .filter(shop -> key.isEmpty() || routingKey(shop.displayName()).contains(key)
+                        || routingKey(shop.area()).contains(key) || routingKey(shop.slug()).contains(key))
+                .toList();
+        return new DirectoryView(matches.stream().limit(PUBLIC_LIMIT).toList(), matches.size() > PUBLIC_LIMIT);
+    }
+
+    List<PublicShop> exactVoiceChoices(String query) {
+        String key = routingKey(query);
+        if (key.isEmpty()) return List.of();
+        return publicShops().stream().filter(shop -> key.equals(routingKey(shop.slug())) || key.equals(routingKey(shop.displayName()))
+                || shop.area() != null && key.equals(routingKey(shop.displayName() + " " + shop.area())))
+                .toList();
+    }
+
+    private List<PublicShop> publicShops() {
+        return db.query("""
+                SELECT slug,display_name,area FROM public.rush_tenants WHERE state='ACTIVE'
+                  AND EXISTS (SELECT 1 FROM public.rush_accounts a WHERE a.id=owner_id AND a.preview_expires_at IS NULL)
+                ORDER BY lower(display_name),slug
+                """, (row, index) -> new PublicShop(row.getString("slug"), row.getString("display_name"), row.getString("area")));
+    }
+
+    private static String routingKey(String text) {
+        if (text == null || text.length() > 220) return "";
+        return Normalizer.normalize(text, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT)
+                .replaceAll("['’]", "").replaceAll("[^\\p{L}\\p{M}\\p{N}]+", " ").strip();
     }
 
     public List<String> activeSchemas() {
-        return db.queryForList("SELECT schema_name FROM public.rush_tenants WHERE state='ACTIVE' ORDER BY schema_name", String.class);
+        return db.queryForList("""
+                SELECT schema_name FROM public.rush_tenants WHERE state='ACTIVE'
+                  AND EXISTS (SELECT 1 FROM public.rush_accounts a WHERE a.id=owner_id AND a.preview_expires_at IS NULL)
+                ORDER BY schema_name
+                """, String.class);
     }
 
     Shop onboard(UUID ownerId, ShopInput input) {
+        return onboard(ownerId, input, null);
+    }
+
+    Shop onboard(UUID ownerId, ShopInput input, Runnable configureHours) {
         String displayName = clean(input.displayName(), 70, true);
         String area = clean(input.area(), 100, false);
         String hours = clean(input.hours(), 100, false);
@@ -79,7 +121,11 @@ public class TenantDirectory {
             Boolean allowed = db.queryForObject("SELECT has_database_privilege(current_database(), 'CREATE')", Boolean.class);
             if (!Boolean.TRUE.equals(allowed)) throw new IllegalStateException("Database role cannot provision a tenant schema");
             Flyway.configure().dataSource(dataSource).schemas(shop.schema()).defaultSchema(shop.schema()).load().migrate();
-            TenantContext.withSchema(shop.schema(), () -> db.update("UPDATE shop_state SET display_name=? WHERE id=1", displayName));
+            TenantContext.withSchema(shop.schema(), () -> {
+                db.update("UPDATE shop_state SET display_name=? WHERE id=1", displayName);
+                if (configureHours != null) configureHours.run();
+                return null;
+            });
             db.update("""
                     UPDATE public.rush_tenants SET display_name=?,area=?,hours=?,pickup_instructions=?,state='ACTIVE'
                     WHERE id=?
@@ -145,4 +191,6 @@ public class TenantDirectory {
 
     public record ShopInput(String displayName, String slug, String area, String hours, String pickupInstructions) {}
     public record ShopView(String slug, String displayName, String area, String hours, String pickupInstructions, boolean demoFixture) {}
+    public record PublicShop(String slug, String displayName, String area) {}
+    public record DirectoryView(List<PublicShop> shops, boolean truncated) {}
 }

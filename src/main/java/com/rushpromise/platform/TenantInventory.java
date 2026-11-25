@@ -1,5 +1,6 @@
 package com.rushpromise.platform;
 
+import com.rushpromise.booking.BookingService;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -21,8 +22,12 @@ import java.util.UUID;
 class TenantInventory {
     private static final ZoneId SHOP_ZONE = ZoneId.of("Asia/Kolkata");
     private final JdbcTemplate db;
+    private final BookingService bookings;
 
-    TenantInventory(JdbcTemplate db) { this.db = db; }
+    TenantInventory(JdbcTemplate db, BookingService bookings) {
+        this.db = db;
+        this.bookings = bookings;
+    }
 
     List<Product> products() {
         requireTenant();
@@ -34,6 +39,35 @@ class TenantInventory {
                 GROUP BY i.sku ORDER BY i.name,i.sku
                 """, (r, n) -> new Product(r.getString("sku"), r.getString("name"), r.getString("sale_unit"),
                 r.getInt("price_per_kg_paise"), r.getInt("total"), r.getInt("free")));
+    }
+
+    PhoneStock phoneStock(String sku) {
+        requireTenant();
+        var item = db.query("SELECT name,sale_unit,price_per_kg_paise FROM items WHERE sku=? FOR UPDATE",
+                (row,index)->new Product(sku,row.getString(1),row.getString(2),row.getInt(3),0,0),sku).stream().findFirst().orElse(null);
+        if (item == null) return null;
+        String batch = "owner-" + sku;
+        var tray = db.query("SELECT phone_grams_total,phone_grams_free,blocked FROM batches WHERE id=? FOR UPDATE",
+                (row,index)->new PhoneStock(new Product(sku,item.itemName(),item.unit(),item.pricePerUnitPaise(),row.getInt(1),row.getInt(2)),
+                        0,row.getBoolean(3),true),batch).stream().findFirst().orElse(new PhoneStock(item,0,false,false));
+        int held = db.queryForObject("SELECT COALESCE(SUM(grams),0)::int FROM orders WHERE batch_id=?"
+                + " AND status IN ('CONFIRMED','AWAITING_APPROVAL','SHORT')", Integer.class,batch);
+        return new PhoneStock(tray.product(),held,tray.blocked(),tray.hasTray());
+    }
+
+    Product changePhonePrice(PhoneStock current, int paise) {
+        requireTenant();
+        var prior = current.product();
+        db.update("UPDATE items SET price_per_kg_paise=? WHERE sku=?",paise,prior.sku());
+        return new Product(prior.sku(),prior.itemName(),prior.unit(),paise,prior.stockQuantity(),prior.freeQuantity());
+    }
+
+    Product changePhoneFreeStock(PhoneStock current, int free) {
+        requireTenant();
+        var prior = current.product();
+        int total = free + current.held();
+        db.update("UPDATE batches SET phone_grams_total=?,phone_grams_free=? WHERE id=?",total,free,"owner-" + prior.sku());
+        return new Product(prior.sku(),prior.itemName(),prior.unit(),prior.pricePerUnitPaise(),total,free);
     }
 
     @Transactional
@@ -60,7 +94,7 @@ class TenantInventory {
                 """, sku, name, request.pricePerUnitPaise(), unit);
         if (written == 0) throw new ResponseStatusException(HttpStatus.CONFLICT, "Product unit changed during save");
 
-        Instant now = db.queryForObject("SELECT now FROM shop_clock", OffsetDateTime.class).toInstant();
+        Instant now = bookings.currentShopTime();
         Instant ready = readyAt(request.readyAt(), now);
         String state = ready.isAfter(now) ? "PLANNED" : "READY";
         db.update("""
@@ -84,21 +118,13 @@ class TenantInventory {
                 UPDATE batches SET phone_grams_total=?,phone_grams_free=?,ready_at=?,status=?,blocked=FALSE WHERE id=?
                 """, request.stockQuantity(), free, sqlTime(ready), state, batch);
         db.update("UPDATE orders SET check_stock=FALSE WHERE batch_id=? AND status IN ('CONFIRMED','AWAITING_APPROVAL','SHORT')", batch);
-        addPickupWindow(now, ready);
         return new Product(sku, name, unit, request.pricePerUnitPaise(), request.stockQuantity(), free);
     }
 
-    private void addPickupWindow(Instant now, Instant ready) {
-        Instant minimum = ready.isAfter(now) ? ready.plus(15, ChronoUnit.MINUTES) : now;
-        Instant first = Instant.ofEpochSecond(((minimum.getEpochSecond() + 899) / 900) * 900);
-        Instant endOfDay = now.atZone(SHOP_ZONE).toLocalDate().plusDays(1).atStartOfDay(SHOP_ZONE).toInstant();
-        Instant planned = first.plus(4, ChronoUnit.HOURS);
-        Instant end = planned.isBefore(endOfDay) ? planned : endOfDay.minusSeconds(1);
-        db.update("""
-                INSERT INTO pickup_slots (pickup_at,capacity)
-                SELECT generate_series(?::timestamptz,?::timestamptz,INTERVAL '15 minutes'),12
-                ON CONFLICT (pickup_at) DO NOTHING
-                """, sqlTime(first), sqlTime(end));
+    void seedDefaultPickupHours() {
+        requireTenant();
+        db.update("UPDATE shop_state SET pickup_all_day=FALSE,pickup_opens_at=TIME '09:00',pickup_closes_at=TIME '21:00'"
+                + " WHERE id=1 AND pickup_all_day IS NULL");
     }
 
     private static Instant readyAt(String raw, Instant current) {
@@ -112,7 +138,7 @@ class TenantInventory {
 
     private static OffsetDateTime sqlTime(Instant time) { return time.atOffset(ZoneOffset.UTC); }
 
-    private static String generatedSku(String name) {
+    static String generatedSku(String name) {
         String slug = name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-").replaceAll("^-|-$", "");
         if (slug.length() > 36) slug = slug.substring(0, 36).replaceAll("-$", "");
         return (slug.isEmpty() ? "item" : slug) + "-" + UUID.randomUUID().toString().substring(0, 8);
@@ -123,6 +149,7 @@ class TenantInventory {
     }
 
     record ProductInput(String sku, String itemName, String unit, int pricePerUnitPaise, int stockQuantity, String readyAt) {}
-    record Product(String sku, String itemName, String unit, int pricePerUnitPaise, int stockQuantity, int freeQuantity) {}
+    public record Product(String sku, String itemName, String unit, int pricePerUnitPaise, int stockQuantity, int freeQuantity) {}
+    record PhoneStock(Product product, int held, boolean blocked, boolean hasTray) {}
     private record ExistingOrders(int held, OffsetDateTime earliest) {}
 }

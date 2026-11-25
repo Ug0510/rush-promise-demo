@@ -1,0 +1,24 @@
+.pickup-hours { display: grid; min-width: 0; gap: .6rem; margin: .9rem 0 .65rem; padding: 0; border: 0; }
+.pickup-hours[hidden], .hours-range[hidden] { display: none !important; }
+.pickup-hours legend { margin-bottom: .55rem; font-weight: 710; }
+.hours-modes { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); overflow: hidden; border: 1px solid var(--line, #d4ded1); border-radius: .72rem; }
+.hours-modes label { position: relative; display: block; padding: 0; margin: 0; font: inherit; }
+.hours-modes input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.hours-modes span { display: block; padding: .65rem .37rem; text-align: center; }
+.hours-modes input:checked + span { background: var(--lime, #c7f094); color: #15371f; font-weight: 710; }
+.hours-modes input:focus-visible + span { outline: 2px solid #2e5835; outline-offset: -3px; }
+.hours-range { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: .7rem; }
+.hours-range label { min-width: 0; }
+.hours-range input { width: 100%; min-width: 0; }
+.pickup-hours .hours-zone { margin: 0; color: var(--muted, #5c665e); font-size: .82rem; }
+
+.owner-phone-settings { display: grid; gap: .62rem; min-width: 0; }
+.owner-phone-settings h3, .owner-phone-settings h4, .owner-phone-settings p { margin: 0; }
+.phone-setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .35rem .7rem; padding: .65rem .72rem; border: 1px solid var(--line, #d7e0d1); border-radius: .65rem; }
+.phone-setting p { color: var(--muted, #525b52); font-size: .82rem; line-height: 1.42; }
+.phone-setting p[role="status"] { font-weight: 700; color: var(--dark, #13351f); }
+.phone-buttons { display: flex; flex-wrap: wrap; gap: .35rem; }
+.phone-setting .button { min-height: 44px; border-radius: .62rem; font-size: .8rem; text-decoration: none; }
+.owner-phone-settings .phone-result { grid-column: 1/-1; width: fit-content; color: var(--dark,#13351f); font-weight: 650; font-size: .83rem; overflow-wrap: anywhere; }
+.phone-setting [data-wa-open] { grid-column: 1/-1; justify-self: start; }
+@media (max-width: 520px) { .phone-setting { grid-template-columns: minmax(0,1fr); } .phone-setting > .button { justify-self: start; } }

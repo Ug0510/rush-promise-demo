@@ -1,5 +1,7 @@
 package com.rushpromise.voice;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rushpromise.booking.GuestCheckouts;
 import com.rushpromise.platform.SarvamShopRouting;
 import com.rushpromise.platform.TenantContext;
 import org.junit.jupiter.api.Test;
@@ -7,6 +9,7 @@ import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
@@ -21,6 +24,7 @@ import static org.mockito.Mockito.*;
 
 class VoiceControllerTest {
     private static final String PHONE = "+919000000001";
+    private static final String NATIVE_SUBJECT = "0123456789abcdef".repeat(4);
     private static final String BEARER = "test-authorized-only";
     private static final MockMultipartFile AUDIO = new MockMultipartFile(
             "audio", "turn.webm", "audio/webm", new byte[]{0x1a, 0x45, (byte) 0xdf, (byte) 0xa3});
@@ -29,7 +33,7 @@ class VoiceControllerTest {
     private final VoiceConversation conversation = mock(VoiceConversation.class);
     private final SarvamShopRouting routing = mock(SarvamShopRouting.class);
     private final VoiceController controller = new VoiceController(speech, sessions, new VoicePrompts(), conversation,
-            routing, BEARER, PHONE);
+            routing, mock(GuestCheckouts.class), BEARER, PHONE);
 
     @Test
     void bookingResultsHaveDistinctSavedAudioWhenSpeechSynthesisFails() {
@@ -145,7 +149,7 @@ class VoiceControllerTest {
         String bakery = "virajs-bakery";
         var route = new SarvamShopRouting.Route(bakery, schema);
         when(routing.choices()).thenReturn(List.of(new SarvamShopRouting.Choice(bakery, "Viraj's Bakery")));
-        var turn = new VoiceController.SarvamTurn(null, interaction, null, 1, null, null, PHONE, "yes", "en-IN", deepak, true);
+        var turn = new VoiceController.SarvamTurn(null, interaction, null, 1, null, null, NATIVE_SUBJECT, "yes", "en-IN", deepak, true);
         var ask = (VoiceController.ShopChoiceReply) controller.sarvamTurn("Bearer " + BEARER, turn).getBody();
         assertThat(ask.state()).isEqualTo("SHOP_SELECTION_REQUIRED");
         verifyNoInteractions(sessions, speech);
@@ -162,12 +166,70 @@ class VoiceControllerTest {
         assertThat(original.shopName()).isEqualTo("Viraj's Bakery");
 
         when(routing.route(anyString())).thenReturn(route);
-        when(sessions.turn(any(), any())).thenAnswer(call -> {
+        when(sessions.nativePickupTurn(anyString(), eq("turn-1"), eq(1), isNull(), eq(""), eq(NATIVE_SUBJECT), any())).thenAnswer(call -> {
             assertThat(TenantContext.schema()).isEqualTo(schema);
             return new VoiceSessionService.Reply("COLLECTING", "yes", "Tell me what you'd like.", "en-IN", null, null);
         });
-        assertThat(controller.sarvamTurn("Bearer " + BEARER, turn).getStatusCode().value()).isEqualTo(200);
+        assertThat(controller.sarvamTurn("Bearer " + BEARER, turn).getBody()).isInstanceOf(VoiceSessionService.Reply.class);
         assertThat(TenantContext.legacy()).isTrue();
+    }
+
+    @Test
+    void absentOrSelfDeclaredContactStaysReadOnlyInAPinnedNativeCall() {
+        String interaction = "Ab12:CD3/A1b2C3d4E5f6G7h8I9j0KLMNOP";
+        String schema = "shop_" + "3".repeat(32);
+        when(routing.route(anyString())).thenReturn(new SarvamShopRouting.Route("deepak-mithai-bhandar", schema));
+        when(conversation.previewWithoutIdentity(anyString(), eq("hi-IN"))).thenAnswer(call -> {
+            assertThat(TenantContext.schema()).isEqualTo(schema);
+            return new VoiceSessionService.Reply("INFORMATION", "", "यह कीमत की जानकारी है।", "hi-IN", null, null);
+        });
+        for (String unverified : new String[]{null, PHONE, "0123", "ABCDEF01".repeat(8)}) {
+            var request = new VoiceController.SarvamTurn(null, interaction, null, 2, UUID.randomUUID(), null,
+                    unverified, "बर्फी की कीमत क्या है?", "hi-IN", null, true);
+            var answer = (VoiceSessionService.Reply) controller.sarvamTurn("Bearer " + BEARER, request).getBody();
+            assertThat(answer.state()).isEqualTo("INFORMATION");
+            assertThat(answer.order()).isNull();
+        }
+        verifyNoInteractions(sessions, speech);
+    }
+
+    @Test
+    void nativeQuoteVariableIsExactAndAnInventedValueDoesNotBecomeConsent() throws Exception {
+        var mapper = new ObjectMapper().findAndRegisterModules();
+        UUID id = UUID.randomUUID();
+        var assigned = mapper.readValue("{\"confirmationQuoteId\":\"" + id + "\"}", VoiceController.SarvamTurn.class);
+        assertThat(assigned.confirmationQuoteId()).isEqualTo(id);
+        for (String supplied : new String[]{"\"latest-quote-id\"", "\"\"", "\"1-2-3-4-5\"", "{}", "null"}) {
+            var invalid = mapper.readValue("{\"confirmationQuoteId\":" + supplied + "}", VoiceController.SarvamTurn.class);
+            assertThat(invalid.confirmationQuoteId()).isNull();
+        }
+        var offer = new VoiceSessionService.Offer(id, "Barfi", 250, 22500, "18:00", false, Instant.EPOCH, "GRAMS", null);
+        var quote = new VoiceSessionService.Reply("AWAITING_CONFIRMATION", "", "ढाई सौ ग्राम। पक्का कर दूँ?", "hi-IN", offer, null);
+        var info = new VoiceSessionService.Reply("INFORMATION", "", "900 रुपये प्रति किलो।", "hi-IN", offer, null);
+        var changed = new VoiceSessionService.Reply("CLARIFY_QUANTITY", "", "वज़न फिर बताइए।", "hi-IN", null, null);
+        assertThat(mapper.valueToTree(quote).get("confirmationToken").asText()).isEqualTo(id.toString());
+        assertThat(mapper.valueToTree(info).get("confirmationToken").asText()).isEmpty();
+        assertThat(mapper.valueToTree(changed).get("confirmationToken").asText()).isEmpty();
+    }
+
+    @Test
+    void callBoundPickupNeedsTheAuthenticatedPinnedModeAndNoPhone() {
+        String interaction = "Ab12:CD3/A1b2C3d4E5f6G7h8I9j0KLMNOP";
+        String schema = "shop_" + "4".repeat(32);
+        String slug = "deepak-mithai-bhandar";
+        var request = new VoiceController.SarvamTurn(null, interaction, null, 1, null, null, null,
+                "ढाई सौ ग्राम बर्फी", "hi-IN", slug, true, "interaction");
+        when(routing.choices()).thenReturn(List.of(new SarvamShopRouting.Choice(slug, "Deepak Mithai Bhandar")));
+        assertThat(controller.sarvamTurn("Bearer " + BEARER, request).getBody()).isInstanceOf(VoiceController.ShopChoiceReply.class);
+        verifyNoInteractions(sessions);
+        when(routing.route(anyString())).thenReturn(new SarvamShopRouting.Route(slug, schema));
+        when(sessions.nativeInteractionTurn(anyString(), eq("turn-1"), eq(1), isNull(), eq(""), any())).thenAnswer(call -> {
+            assertThat(TenantContext.schema()).isEqualTo(schema);
+            return new VoiceSessionService.Reply("COLLECTING", "", "पिकअप का समय?", "hi-IN", null, null);
+        });
+        assertThat(controller.sarvamTurn("Bearer " + BEARER, request).getBody()).isInstanceOf(VoiceSessionService.Reply.class);
+        verify(sessions).nativeInteractionTurn(anyString(), eq("turn-1"), eq(1), isNull(), eq(""), any());
+        assertThatThrownBy(() -> controller.sarvamTurn("Bearer wrong", request)).isInstanceOf(ResponseStatusException.class);
     }
 
     @Test

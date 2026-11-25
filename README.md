@@ -1,6 +1,10 @@
 # Rush Promise
 
-Voice ordering and pickup for independent shops. Each owner sets up a shop, prices its own menu, and records stock set aside for pickup. A customer hears the price and pickup time before confirming. Rush Promise reserves the stock and pickup place together, while staff pack the order and follow its notices.
+Rush Promise helps independent shops take orders and reserve pickup times. Buyers can enter an order, review the price and pickup time, and confirm. The shop reserves the stock and pickup place together. Buyers pay cash at pickup. [Open the live demo](https://rush-promise.udit-gupta.com/)
+
+Choose **Try demo shop** to open Deepak’s private sample workspace without signing up. Edit sample stock, prices and pickup hours without affecting a live shop. [Try Deepak’s demo](https://rush-promise.udit-gupta.com/owner#signup)
+
+When the phone provider is available, buyers can call the shared line to order from a chosen shop. Owners can use a separate one-time code to hear and update their own inventory. Typed guest checkout works without speech-provider credits.
 
 ## Run it locally
 
@@ -34,11 +38,19 @@ Reuse an existing PostgreSQL 16 instance by setting the three `SPRING_DATASOURCE
 
 ### Run two separate shops
 
-On the private local web connection, open `/owner`, create an owner login, and choose a shop name and link. A new shop starts with an empty catalog. Add an item with a price in rupees per kilogram or per piece and record the quantity physically set aside. You can also enter an optional area, opening hours and pickup instructions. The same-day pickup windows come from stock and slot availability. The opening-hours text is shown to buyers.
+Open `/owner`, create an owner login, and choose a shop name and link. A new shop starts with an empty catalog. Add an item with a price in rupees per kilogram or per piece and record the quantity physically set aside. In shop settings, choose all-day pickup or an opening and closing time. One save keeps the shop profile and hours together. Deepak Mithai Bhandar and Viraj’s Bakery start at 9:00 AM–9:00 PM IST. An owner’s saved hours survive restart.
+
+**Try demo shop** opens a separate two-hour workspace with editable sample inventory and pickup hours. The demo has its own limit, stays outside customer search and phone routing, and has no live orders or contact settings. Open a normal owner account when you are ready to list a shop publicly.
 
 Use `/caller?shop=<slug>` to open a buyer page. The public `GET /api/storefront/<slug>` shows the named shop and its menu with example prices and eligible times for available stock and weighed future trays. The shop link does not change the account scope for owner actions. Owners have separate products, stock, orders, voice turns and notification jobs. Owner cookies expire and a sign-out revokes the server session. Private edits require the session's CSRF token.
 
-The local default allows signup. The stage uses `RUSH_SIGNUP_ENABLED=false` and a protected two-account handoff supplied in `RUSH_DEMO_OWNER_FILE` or `RUSH_DEMO_OWNER_BUNDLE`. Deepak Mithai Bhandar and Viraj's Bakery carry explicitly labelled demo stock and prices. The private owner portal uses the separate web forward. The public gateway permits the two buyer pages and their storefront data. Merchant notifications use the console transport. The original one-order WhatsApp proof uses the isolated legacy shop grant.
+Typed checkout uses `POST /api/checkout/text` for an active storefront. It uses the same stock, price and schedule checks as voice and requires the buyer to confirm the current offer explicitly. It works without speech-provider credits. `POST /api/checkout/guest` issues shop-bound credentials for up to 24 hours, so a buyer can reserve one pickup without entering a phone number and recover the same receipt after reloading. The buyer sees the order reference, pickup time and guest pickup code in the checkout. Payment is cash at pickup. Typed checkout does not queue a buyer message.
+
+Owner inventory by phone uses a separate one-time eight-digit shop code, generated while signed in. When the WhatsApp integration is enabled, a linked owner can also send `PIN` or `पिन` from the verified WhatsApp conversation and receive a fresh code. The code expires in ten minutes and opens inventory for one call only. Ask for an item’s current free stock and price, set or add stock for new pickups, change its price, or add an item sold by weight or by the piece. The assistant reads back the units and proposed change and waits for the owner to say the exact approval phrase. The stock count for new orders can be set to zero while existing reserved quantities stay held. An opted-in, verified owner can receive a shop-only new-order alert during an open WhatsApp conversation.
+
+`RUSH_SIGNUP_ENABLED` controls public registration. `RUSH_MAX_OWNER_ACCOUNTS` defaults to 30 total accounts for this deployment. Operators may provision the two labelled demonstration stores using the protected `RUSH_DEMO_OWNER_FILE` or `RUSH_DEMO_OWNER_BUNDLE`. Use `/api/public/shops?query=…` to search active shops by public name, area or link. An optional `RUSH_PUBLIC_PHONE` advertises the configured shared line. On the line, callers can identify an active shop by its full name, add its area if there is another match, or use its link name. The first resolved shop stays fixed for that call. The original handset notification proof uses the isolated legacy shop grant.
+
+The storefront evaluates half-hour pickups against the merchant’s local date, hours, lead time, remaining tray stock and slot capacity. The closing time is included when a pickup remains eligible. One option can fall on the next day when the shop has stock physically set aside. Future availability stays tied to that weighed stock. Choosing an option preserves its date and time through confirmation. When hours change while a caller is deciding, an ineligible offer needs a fresh quote and assent. Already confirmed pickups retain their original dates and times. The merchant portals use real IST. Set `RUSH_MERCHANT_DEMO_CLOCK=true` only in an isolated rehearsal that supplies a fixture clock.
 
 ### Try the last box without a microphone
 
@@ -88,7 +100,7 @@ Load live credentials from an environment or secret manager. For the hosted demo
 | **Flagsmith** | `FLAGSMITH_ENVIRONMENT_KEY`; optional `FLAGSMITH_API_URL` for the legacy self-hosted switch. The hosted Development switch belongs to the platform operator. Merchant owners see policy facts for their own orders. The optional `RUSH_SLOT_POLICY_ENABLED=true` mode evaluates `promise_profile` against one captured Development document and actual pickup occupancy. Quote and order history show the selected rule, evidence source, digest and the slot's use before the booking. |
 | **Twilio WhatsApp Sandbox** | Keep `NOTIFIER=console` for local simulations. The isolated live worker uses `NOTIFIER=twilio` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_MSG_FROM`, `RUSH_PUBLIC_BASE_URL`, and the enrolled `RUSH_DEMO_HANDSET`. The signed status endpoint is `POST /webhooks/twilio/status`. Follow the one-order release procedure in [ops/README.md](ops/README.md). |
 | **NudgeBee** | The cluster agent relays the Prometheus/Alertmanager queue signal. See [ops/README.md](ops/README.md) for the isolated worker outage, approval reference and recovery commands. |
-| **Sarvam phone tool** | `RUSH_SARVAM_TOOL_TOKEN` for the bearer-protected `POST /api/voice/sarvam/turn`. The tool can consume a provider transcript and share the booking engine. An active verified inbound phone line and attached provider agent are a separate setup. The browser is the current speech path. |
+| **Sarvam phone tool** | `RUSH_SARVAM_TOOL_TOKEN` for the bearer-protected `POST /api/voice/sarvam/turn`. The hosted phone agent binds each interaction to one merchant and calls the same booking engine. The browser microphone route works independently. |
 
 ### Run the isolated kind deployment
 
@@ -102,7 +114,15 @@ kubectl -n dev-data port-forward --address 127.0.0.1 svc/rush-promise-gateway 18
 kubectl -n dev-data port-forward --address 127.0.0.1 svc/rush-promise-web 18082:8080
 ```
 
-The stage caller uses `/caller` on the approved HTTPS origin for port 18081. The gateway serves the caller page and assets, the two approved storefronts, the voice POST paths and the signed Twilio status endpoint. Staff and owners use `/staff` and `/owner` on the private port 18082. Signup, owner APIs, order APIs, reset, metrics and PostgreSQL stay private. See the [one-order release and operator recovery procedure](ops/README.md#one-live-order) before enabling delivery to the enrolled handset.
+The buyer uses `/caller?shop=<slug>` on the approved HTTPS origin. The public onboarding profile exposes `/owner` for account and shop setup, and `/owner/desk` for the signed-in shop’s own order queue and fulfillment. Owner requests use the session cookie and writes require its CSRF token. The raw `/staff` route, shared access tokens, reset, monitoring and PostgreSQL are available only on the separate private connection. See the [one-order release and operator recovery procedure](ops/README.md#one-live-order) before enabling delivery to the enrolled handset.
+
+### Judge walkthrough for the two shops
+
+Open the two buyer pages and the corresponding private owner desks. Deepak prices barfi and kaju katli by weight. Viraj prices cupcakes and brownies by piece. Ask for an item, quantity and time. The assistant can give a price and eligible half-hour pickup options before creating a booking. After a correction, listen for the updated amount, local date and slot, then confirm that offer. Compare the saved customer pickup and the private desk. To demonstrate an hours edit, use one store’s settings and check both storefronts afterward.
+
+When the provider binds the call and supplies a stable caller identity, the assistant can use ordinary stock, slot and approval rules without storing a phone number. The call-only path saves one ordinary pickup per authenticated interaction. A pickup that needs approval calls for a suitable later slot or shop assistance. If the provider cannot return the current quote receipt with an explicit yes, the assistant repeats the current terms with a short confirmation number tied to that offer. Saying yes with that number can then book the offer. The saved order has a separate pickup code, which also appears in the signed-in shop’s desk. Pickup-code orders do not queue a buyer message.
+
+On 25 November 2026 at 16:05–16:06 IST, a real inbound customer handset call booked exactly one Deepak pickup after explicit assent. Order `4823` was 500 g of barfi for ₹450 cash at 18:00 IST. The assistant spoke the order number and pickup code. This was separate from browser order `4822`, whose confirmation and ready notices reached the enrolled WhatsApp handset. Owner inventory operations were verified through authenticated HTTPS rehearsal. A real owner handset call remains unverified.
 
 ## The three demo moments
 
@@ -120,9 +140,9 @@ Start with Rush off and quote 4 kg barfi at 8:00 PM. The platform operator enabl
 
 ## Why two callers cannot book the last box
 
-PostgreSQL locks the selected tray and time slot in the same transaction. It checks the number of grams or pieces, the 15-minute preparation buffer, capacity and the current order terms before inserting an order. The transaction writes the reservation, event, terminal booking decision and outbox job together. A rejected quote can include a persisted alternative. The database keeps each accepted quote unique, even if two clients choose different idempotency keys. Retrying a lost response reads the same decision. Prices are stored in paise. Each merchant has a separate database schema, selected by the validated owner session, shop link or shop-specific native voice credential. Schema provisioning requires database-level `CREATE` for the application role.
+PostgreSQL locks the selected tray and time slot in the same transaction. It checks the number of grams or pieces, the 15-minute preparation buffer, capacity and the current order terms before inserting an order. The transaction writes the reservation, event, booking decision and any applicable notification job together. A rejected quote can include a persisted alternative. The database keeps each accepted quote unique, even if two clients choose different idempotency keys. Retrying a lost response reads the same decision. Prices are stored in paise. Each merchant has a separate database schema, selected by the validated owner session, shop link or shop-specific native voice credential. Schema provisioning requires database-level `CREATE` for the application role.
 
-The original order retains its policy snapshot. The per-slot mode locks and rereads the same capacity row that it will update. It evaluates the captured rules before applying any stock or capacity change. A different approval requirement, approval hold or price requires a new yes. A refresh that changes only the digest or quote lifetime leaves an unexpired offer valid. Bulk approval holds are limited to one pending request per phone and end by the pickup preparation cutoff. Approval, expiry, and packing transitions serialize with stock updates.
+The original order retains its policy snapshot. The per-slot mode locks and rereads the same capacity row that it will update. It evaluates the captured rules before applying any stock or capacity change. A different approval requirement, approval hold or price requires a new yes. A refresh that changes only the digest or quote lifetime leaves an unexpired offer valid. Bulk approval holds are limited to one pending request for each verified contact or caller identity. They end by the pickup preparation cutoff. Approval, expiry, and packing transitions serialize with stock updates.
 
 The private owner desk can requeue an eligible rate-limit failure or review an uncertain notice. An uncertain resend requires the owner's confirmation. PostgreSQL checks the current order and recorded provider receipts again while saving the decision. The one-order live demonstration grant does not permit a manual resend.
 
